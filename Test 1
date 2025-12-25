@@ -1,1012 +1,1315 @@
-git branch -M main
-git push -u origin main
-
-
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-/**
- * Dice Duel — 4-player dice battle
- * - No 3D animation
- * - Winner outline (white border)
- * - Auto-advance after each round (no Next Round button)
- * - Spectator mode auto-plays after human elimination
- */
-
-// ---------- Types ----------
-
-type DiceSides = 4 | 6 | 10 | 12 | 20;
-
-type ColorOption = {
-  id: string;
-  label: string;
-  swatch: string;
-  hex: string;
-};
-
-type Player = {
-  id: number;
-  name: string;
-  isHuman: boolean;
-  color: ColorOption;
-  dice: DiceSides[];
-  eliminated: boolean;
-};
-
-type RollRow = { playerId: number; sides: DiceSides; roll: number };
-
-type Reveal = {
-  round: number;
-  phase: "done";
-  rolls: RollRow[];
-  winnerIdx: number;
-  loot: DiceSides[];
-  tieBreaks: number;
-};
-
-type LogEntry = {
-  round: number;
-  winnerName: string;
-  tieBreaks: number;
-  loot: DiceSides[];
-  results: Array<{ playerId: number; name: string; sides: DiceSides; roll: number; isWinner: boolean }>;
-};
-
-// ---------- Constants ----------
-
-const DICE_SIDES: DiceSides[] = [4, 6, 10, 12, 20];
-
-const COLOR_OPTIONS: ColorOption[] = [
-  { id: "crimson", label: "Crimson", swatch: "bg-red-600", hex: "#dc2626" },
-  { id: "azure", label: "Azure", swatch: "bg-sky-600", hex: "#0284c7" },
-  { id: "emerald", label: "Emerald", swatch: "bg-emerald-600", hex: "#059669" },
-  { id: "violet", label: "Violet", swatch: "bg-violet-600", hex: "#7c3aed" },
-  { id: "amber", label: "Amber", swatch: "bg-amber-500", hex: "#f59e0b" },
-  { id: "slate", label: "Slate", swatch: "bg-slate-700", hex: "#334155" },
-];
-
-const COMPUTER_NAMES = ["Computer A", "Computer B", "Computer C"] as const;
-
-// ---------- Helpers ----------
-
-function cls(...parts: Array<string | false | null | undefined>) {
-  return parts.filter(Boolean).join(" ");
-}
-
-function shortDie(sides: DiceSides) {
-  return `D${sides}`;
-}
-
-function rollDie(sides: DiceSides) {
-  return Math.floor(Math.random() * sides) + 1;
-}
-
-function removeOneDie(pool: DiceSides[], sides: DiceSides) {
-  const idx = pool.indexOf(sides);
-  if (idx === -1) return pool;
-  const next = pool.slice();
-  next.splice(idx, 1);
-  return next;
-}
-
-function addDice(pool: DiceSides[], diceToAdd: DiceSides[]) {
-  return pool.concat(diceToAdd);
-}
-
-function alivePlayers(players: Player[]) {
-  return players.filter((p) => !p.eliminated && p.dice.length > 0);
-}
-
-function updateEliminations(players: Player[]) {
-  return players.map((p) => ({ ...p, eliminated: p.dice.length === 0 }));
-}
-
-function totalDice(players: Player[]) {
-  return players.reduce((sum, p) => sum + p.dice.length, 0);
-}
-
-function crownText(players: Player[]) {
-  const alive = alivePlayers(players);
-  if (alive.length === 1) {
-    const w = alive[0];
-    return `${w.isHuman ? "You" : w.name} wins!`;
-  }
-  return "";
-}
-
-function countBySides(dice: DiceSides[]) {
-  const map = new Map<DiceSides, number>();
-  for (const s of dice) map.set(s, (map.get(s) || 0) + 1);
-  return [...map.entries()].sort((a, b) => a[0] - b[0]);
-}
-
-function expandDice(dice: DiceSides[]) {
-  return dice.slice().sort((a, b) => a - b);
-}
-
-function makeInitialPlayers(userColorId: string): Player[] {
-  const userColor = COLOR_OPTIONS.find((c) => c.id === userColorId) || COLOR_OPTIONS[0];
-  const otherColors = COLOR_OPTIONS.filter((c) => c.id !== userColor.id);
-
-  return [
-    { id: 0, name: "You", isHuman: true, color: userColor, dice: [...DICE_SIDES], eliminated: false },
-    {
-      id: 1,
-      name: COMPUTER_NAMES[0],
-      isHuman: false,
-      color: otherColors[0] || COLOR_OPTIONS[1],
-      dice: [...DICE_SIDES],
-      eliminated: false,
-    },
-    {
-      id: 2,
-      name: COMPUTER_NAMES[1],
-      isHuman: false,
-      color: otherColors[1] || COLOR_OPTIONS[2],
-      dice: [...DICE_SIDES],
-      eliminated: false,
-    },
-    {
-      id: 3,
-      name: COMPUTER_NAMES[2],
-      isHuman: false,
-      color: otherColors[2] || COLOR_OPTIONS[3],
-      dice: [...DICE_SIDES],
-      eliminated: false,
-    },
-  ];
-}
-
-function chooseAIDie(aiPlayer: Player, context: { minDiceCount: number }): DiceSides | null {
-  const dice = aiPlayer.dice;
-  if (!dice.length) return null;
-
-  const { minDiceCount } = context;
-  const isTrailing = dice.length === minDiceCount;
-
-  if (isTrailing) {
-    const sorted = dice.slice().sort((a, b) => a - b);
-    const top = sorted.slice(-2);
-    if (Math.random() < 0.75 && top.length) return top[Math.floor(Math.random() * top.length)];
-  }
-
-  return dice[Math.floor(Math.random() * dice.length)];
-}
-
-// ---------- UI components ----------
-
-function Badge({ color, children }: { color?: ColorOption; children: React.ReactNode }) {
-  return (
-    <span
-      className={cls(
-        "inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold",
-        "bg-white/10 border border-white/10"
-      )}
-    >
-      <span className={cls("h-2.5 w-2.5 rounded-full", color?.swatch || "bg-slate-500")} />
-      {children}
-    </span>
-  );
-}
-
-function Card({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={cls("rounded-2xl border border-white/10 bg-white/[0.05] shadow-sm", "backdrop-blur-md", className)}>
-      {children}
-    </div>
-  );
-}
-
-function PrimaryButton({
-  children,
-  onClick,
-  disabled,
-  className,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  disabled?: boolean;
-  className?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={cls(
-        "rounded-xl px-4 py-2 font-semibold",
-        disabled
-          ? "bg-white/10 text-white/40 cursor-not-allowed"
-          : "bg-white text-slate-900 hover:bg-white/90 active:bg-white/80",
-        className
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function GhostButton({
-  children,
-  onClick,
-  disabled,
-  className,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  disabled?: boolean;
-  className?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={cls(
-        "rounded-xl px-4 py-2 font-semibold",
-        disabled
-          ? "bg-white/5 text-white/30 cursor-not-allowed"
-          : "bg-white/5 hover:bg-white/10 active:bg-white/15 text-white",
-        "border border-white/10",
-        className
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function DieIcon({ sides, className }: { sides: DiceSides; className?: string }) {
-  const common = "fill-white/10 stroke-white/55";
-  const text = "fill-white";
-
-  const shape = (() => {
-    switch (sides) {
-      case 4:
-        return <polygon points="16,4 28,28 4,28" className={common} />;
-      case 6:
-        return <rect x="5" y="5" width="22" height="22" rx="4" className={common} />;
-      case 10:
-        return <polygon points="16,3 29,16 16,29 3,16" className={common} />;
-      case 12:
-        return <polygon points="16,2 26,7 30,16 26,25 16,30 6,25 2,16 6,7" className={common} />;
-      case 20:
-        return <circle cx="16" cy="16" r="13" className={common} />;
-      default:
-        return <rect x="5" y="5" width="22" height="22" rx="4" className={common} />;
+<!doctype html>
+<html lang="en" class="h-full">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dice Duel V6</title>
+  <script src="/_sdk/element_sdk.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    body {
+      box-sizing: border-box;
     }
-  })();
+    
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 30px rgba(255, 215, 0, 0.8), 0 0 60px rgba(255, 215, 0, 0.4); }
+      50% { box-shadow: 0 0 50px rgba(255, 215, 0, 1), 0 0 80px rgba(255, 215, 0, 0.6); }
+    }
+    
+    .winner-glow {
+      animation: pulse-glow 1.5s ease-in-out infinite;
+      border: 4px solid #ffd700;
+      border-radius: 20px;
+      background: linear-gradient(145deg, rgba(255, 215, 0, 0.2), rgba(255, 215, 0, 0.1));
+    }
+    
+    @keyframes screenShake {
+      0%, 100% { transform: translate(0, 0); }
+      10%, 30%, 50%, 70%, 90% { transform: translate(-2px, -2px); }
+      20%, 40%, 60%, 80% { transform: translate(2px, 2px); }
+    }
+    
+    .screen-shake {
+      animation: screenShake 0.5s ease-in-out;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .fade-in {
+      animation: fadeIn 0.4s ease-out;
+    }
+    
+    .dice-draggable {
+      cursor: grab;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      transform-style: preserve-3d;
+      perspective: 1000px;
+    }
+    
+    .dice-draggable:active {
+      cursor: grabbing;
+    }
+    
+    .dice-draggable:hover {
+      transform: translateY(-8px) rotateX(10deg);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    }
+    
+    .dragging {
+      opacity: 0.8;
+      transform: scale(1.1) rotate(5deg);
+      z-index: 1000;
+    }
+    
+    .drop-zone {
+      border: 3px dashed rgba(139, 92, 246, 0.5);
+      background: rgba(139, 92, 246, 0.1);
+    }
+    
+    .drop-zone-active {
+      border-color: rgba(139, 92, 246, 1);
+      background: rgba(139, 92, 246, 0.3);
+    }
+    
+    /* Dice colors */
+    .dice-d4 { background: linear-gradient(145deg, #ef4444, #dc2626); }
+    .dice-d6 { background: linear-gradient(145deg, #3b82f6, #2563eb); }
+    .dice-d10 { background: linear-gradient(145deg, #10b981, #059669); }
+    .dice-d12 { background: linear-gradient(145deg, #f59e0b, #d97706); }
+    .dice-d20 { background: linear-gradient(145deg, #8b5cf6, #7c3aed); }
+    
+    /* Polygon shapes */
+    .dice-shape-d4 {
+      clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+    }
+    
+    .dice-shape-d6 {
+      /* Square */
+    }
+    
+    .dice-shape-d10 {
+      clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+    }
+    
+    .dice-shape-d12 {
+      clip-path: polygon(50% 0%, 85% 15%, 100% 50%, 85% 85%, 50% 100%, 15% 85%, 0% 50%, 15% 15%);
+    }
+    
+    .dice-shape-d20 {
+      clip-path: polygon(50% 0%, 80% 10%, 100% 35%, 95% 65%, 75% 90%, 50% 100%, 25% 90%, 5% 65%, 0% 35%, 20% 10%);
+    }
+    
+    .player-card {
+      transition: transform 0.2s ease;
+    }
+    
+    .player-card:hover {
+      transform: translateY(-2px);
+    }
+  </style>
+  <style>@view-transition { navigation: auto; }</style>
+  <script src="/_sdk/data_sdk.js" type="text/javascript"></script>
+ </head>
+ <body class="h-full">
+  <div id="app" class="h-full w-full overflow-auto"></div>
+  <script>
+    // ========== Configuration ==========
+    const defaultConfig = {
+      game_title: "Dice Duel",
+      player_name: "You",
+      end_on_elimination: "no",
+      background_color: "#0f172a",
+      surface_color: "#1e293b",
+      text_color: "#f1f5f9",
+      primary_action_color: "#8b5cf6",
+      secondary_action_color: "#64748b",
+      font_family: "system-ui",
+      font_size: 16
+    };
 
-  return (
-    <svg
-      viewBox="0 0 32 32"
-      width="22"
-      height="22"
-      className={cls("shrink-0", className)}
-      aria-label={shortDie(sides)}
-      role="img"
-    >
-      {shape}
-      <text
-        x="16"
-        y="19"
-        textAnchor="middle"
-        fontSize="10"
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-        className={text}
-      >
-        {shortDie(sides)}
-      </text>
-    </svg>
-  );
-}
+    // ========== Game Constants ==========
+    const DICE_SIDES = [4, 6, 10, 12, 20];
+    
+    const DICE_COLORS = {
+      4: { hex: '#ef4444', name: 'Red' },
+      6: { hex: '#3b82f6', name: 'Blue' },
+      10: { hex: '#10b981', name: 'Green' },
+      12: { hex: '#f59e0b', name: 'Orange' },
+      20: { hex: '#8b5cf6', name: 'Purple' }
+    };
+    
+    const COLOR_OPTIONS = [
+      { id: "crimson", label: "Crimson", hex: "#dc2626" },
+      { id: "azure", label: "Azure", hex: "#0284c7" },
+      { id: "emerald", label: "Emerald", hex: "#059669" },
+      { id: "violet", label: "Violet", hex: "#7c3aed" },
+      { id: "amber", label: "Amber", hex: "#f59e0b" },
+      { id: "slate", label: "Slate", hex: "#334155" },
+    ];
+    
+    const COMPUTER_NAMES = ["Computer A", "Computer B", "Computer C"];
 
-function DiceChip({
-  sides,
-  onDragStart,
-  draggable = true,
-  disabled = false,
-}: {
-  sides: DiceSides;
-  onDragStart?: (s: DiceSides) => void;
-  draggable?: boolean;
-  disabled?: boolean;
-}) {
-  const canDrag = draggable && !disabled;
-  return (
-    <div
-      draggable={canDrag}
-      onDragStart={(e) => {
-        if (!canDrag) return;
-        try {
-          e.dataTransfer.setData("text/plain", String(sides));
-          e.dataTransfer.effectAllowed = "move";
-        } catch {
-          // ignore
+    // ========== Game State ==========
+    let gameState = {
+      players: [],
+      round: 0,
+      phase: "setup",
+      selectedDie: null,
+      currentReveal: null,
+      gameLog: [],
+      isSpectatorMode: false,
+      draggedDie: null,
+      activeRenderers: []
+    };
+
+    // ========== 3D Dice Rendering ==========
+    class DiceRenderer3D {
+      constructor(container, sides, colorHex) {
+        this.container = container;
+        this.sides = sides;
+        this.colorHex = colorHex;
+        this.scene = null;
+        this.camera = null;
+        this.renderer = null;
+        this.dice = null;
+        this.animationId = null;
+        this.numberSprites = [];
+        this.autoRotate = true;
+        
+        this.init();
+      }
+      
+      init() {
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
+        this.camera.position.z = 5;
+        
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this.renderer.setSize(200, 200);
+        this.renderer.setClearColor(0x000000, 0);
+        this.container.appendChild(this.renderer.domElement);
+        
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        this.scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9);
+        directionalLight.position.set(5, 5, 5);
+        this.scene.add(directionalLight);
+        
+        this.createDice();
+        this.animate();
+      }
+      
+      createDice() {
+        let geometry;
+        
+        switch(this.sides) {
+          case 4:
+            geometry = new THREE.TetrahedronGeometry(1.8);
+            break;
+          case 6:
+            geometry = new THREE.BoxGeometry(2.2, 2.2, 2.2);
+            break;
+          case 10:
+            // D10 - pentagonal trapezohedron (true D10 shape)
+            const vertices = [];
+            const radius = 1.5;
+            const topHeight = 1.5;
+            const bottomHeight = -1.5;
+            
+            // Top apex (vertex 0)
+            vertices.push(0, topHeight, 0);
+            
+            // Upper pentagon ring (vertices 1-5)
+            for (let i = 0; i < 5; i++) {
+              const angle = (i * 2 * Math.PI / 5) - Math.PI / 2;
+              vertices.push(
+                Math.cos(angle) * radius,
+                topHeight * 0.25,
+                Math.sin(angle) * radius
+              );
+            }
+            
+            // Lower pentagon ring (vertices 6-10) - offset by 36 degrees
+            for (let i = 0; i < 5; i++) {
+              const angle = (i * 2 * Math.PI / 5) - Math.PI / 2 + (Math.PI / 5);
+              vertices.push(
+                Math.cos(angle) * radius,
+                bottomHeight * 0.25,
+                Math.sin(angle) * radius
+              );
+            }
+            
+            // Bottom apex (vertex 11)
+            vertices.push(0, bottomHeight, 0);
+            
+            // Faces - 10 kite-shaped faces (each face needs consistent winding order)
+            const indices = [];
+            
+            // Top 5 kite faces
+            for (let i = 0; i < 5; i++) {
+              const upper1 = 1 + i;
+              const upper2 = 1 + ((i + 1) % 5);
+              const lower1 = 6 + i;
+              
+              // Triangle 1: top apex -> upper1 -> upper2
+              indices.push(0, upper1, upper2);
+              
+              // Triangle 2: upper1 -> lower1 -> upper2
+              indices.push(upper1, lower1, upper2);
+            }
+            
+            // Bottom 5 kite faces
+            for (let i = 0; i < 5; i++) {
+              const lower1 = 6 + i;
+              const lower2 = 6 + ((i + 1) % 5);
+              const upper2 = 1 + ((i + 1) % 5);
+              
+              // Triangle 1: lower1 -> upper2 -> lower2
+              indices.push(lower1, upper2, lower2);
+              
+              // Triangle 2: lower2 -> bottom apex -> lower1
+              indices.push(lower2, 11, lower1);
+            }
+            
+            geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+            break;
+          case 12:
+            geometry = new THREE.DodecahedronGeometry(1.5);
+            break;
+          case 20:
+            geometry = new THREE.IcosahedronGeometry(1.8);
+            break;
+          default:
+            geometry = new THREE.BoxGeometry(2, 2, 2);
         }
-        onDragStart?.(sides);
-      }}
-      className={cls(
-        "inline-flex items-center gap-2 rounded-xl border px-3 py-2",
-        "bg-white/5",
-        disabled
-          ? "opacity-40 cursor-not-allowed"
-          : canDrag
-          ? "cursor-grab active:cursor-grabbing"
-          : "cursor-default",
-        "border-white/10 hover:border-white/20"
-      )}
-      title={disabled ? "Unavailable" : canDrag ? "Drag into the play field to throw" : "Die"}
-    >
-      <DieIcon sides={sides} className="opacity-95" />
-      <span className="font-mono text-sm font-semibold">{shortDie(sides)}</span>
-    </div>
-  );
-}
-
-function DicePile({
-  dice,
-  disabled = false,
-  onDragStart,
-  draggable = true,
-  cap = 28,
-}: {
-  dice: DiceSides[];
-  disabled?: boolean;
-  onDragStart?: (s: DiceSides) => void;
-  draggable?: boolean;
-  cap?: number;
-}) {
-  const expanded = useMemo(() => expandDice(dice), [dice]);
-  const shown = expanded.slice(0, cap);
-  const remaining = expanded.length - shown.length;
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      {shown.map((s, idx) => (
-        <DiceChip key={`${s}-${idx}`} sides={s} onDragStart={onDragStart} disabled={disabled} draggable={draggable} />
-      ))}
-      {remaining > 0 ? (
-        <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
-          +{remaining} more
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function PlayerStats({ players }: { players: Player[] }) {
-  return (
-    <Card className="p-4">
-      <h3 className="text-base font-semibold">Players</h3>
-      <div className="mt-3 space-y-2 text-sm">
-        {players.map((p) => (
-          <div
-            key={`stat-${p.id}`}
-            className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
-          >
-            <div className="flex items-center gap-2">
-              <span className={cls("h-2.5 w-2.5 rounded-full", p.color.swatch)} />
-              <span className={cls("text-white/85", p.eliminated ? "line-through opacity-70" : "")}>
-                {p.isHuman ? "You" : p.name}
-              </span>
-            </div>
-            <span className="font-semibold">{p.dice.length}</span>
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 text-xs text-white/60">Drag a die into the play field to throw.</div>
-    </Card>
-  );
-}
-
-function Log({ items }: { items: LogEntry[] }) {
-  return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-base font-semibold">Match Log</h3>
-        <span className="text-xs text-white/60">Newest first</span>
-      </div>
-      <div className="mt-3 max-h-[34rem] overflow-auto space-y-2 pr-1">
-        {items.length === 0 ? (
-          <div className="text-sm text-white/60">No rounds yet. Throw a die to begin.</div>
-        ) : (
-          items.map((it, idx) => (
-            <div key={idx} className="rounded-xl border border-white/10 bg-white/[0.03] p-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold">Round {it.round}</span>
-                <span className="text-white/60">•</span>
-                <span className="text-white/80">Winner:</span>
-                <span className="font-semibold">{it.winnerName}</span>
-                {it.tieBreaks > 0 ? (
-                  <span className="text-xs text-white/60">(tie-breaks: {it.tieBreaks})</span>
-                ) : null}
-              </div>
-              <div className="mt-2 grid gap-2">
-                {it.results.map((r) => (
-                  <div
-                    key={r.playerId}
-                    className={cls(
-                      "flex items-center justify-between rounded-lg border bg-white/5 px-3 py-2",
-                      r.isWinner ? "border-white" : "border-white/10"
-                    )}
-                  >
-                    <span className="text-white/80">{r.name}</span>
-                    <span className="font-mono text-white inline-flex items-center gap-2">
-                      <DieIcon sides={r.sides} className="opacity-90" />
-                      <span>
-                        {shortDie(r.sides)} → {r.roll}
-                      </span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-2 text-xs text-white/60 flex flex-wrap items-center gap-2">
-                <span>Loot:</span>
-                {it.loot.map((s, i) => (
-                  <span
-                    key={`${it.round}-loot-${s}-${i}`}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1"
-                  >
-                    <DieIcon sides={s} className="opacity-90" />
-                    <span className="font-mono">{shortDie(s)}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-    </Card>
-  );
-}
-
-function RollResultsPanel({ players, reveal }: { players: Player[]; reveal: Reveal | null }) {
-  if (!reveal) {
-    return (
-      <Card className="p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-base font-semibold">Roll field</h3>
-          <div className="text-xs text-white/60">Drop a die to throw</div>
-        </div>
-        <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-white/70">
-          Waiting for a throw.
-        </div>
-      </Card>
-    );
-  }
-
-  const sorted = reveal.rolls.slice().sort((a, b) => a.playerId - b.playerId);
-
-  return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-base font-semibold">Roll field</h3>
-        <div className="text-xs text-white/60">Result (winner outlined)</div>
-      </div>
-
-      <div className="mt-4 grid gap-2">
-        {sorted.map((r) => (
-          <div
-            key={`rrow-${r.playerId}`}
-            className={cls(
-              "flex items-center justify-between rounded-xl border bg-white/5 px-3 py-2",
-              r.playerId === reveal.winnerIdx ? "border-white" : "border-white/10"
-            )}
-          >
-            <span className="text-sm text-white/85">{players?.[r.playerId]?.isHuman ? "You" : players?.[r.playerId]?.name}</span>
-            <span className="font-mono text-sm inline-flex items-center gap-2">
-              <DieIcon sides={r.sides} />
-              {shortDie(r.sides)} → <span className="font-semibold">{r.roll}</span>
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-white/70">Winner:</span>
-          <span className="font-semibold">{players?.[reveal.winnerIdx]?.isHuman ? "You" : players?.[reveal.winnerIdx]?.name}</span>
-          {reveal.tieBreaks > 0 ? <span className="text-xs text-white/60">(tie-breaks: {reveal.tieBreaks})</span> : null}
-        </div>
-        <div className="mt-2 text-xs text-white/60 flex flex-wrap items-center gap-2">
-          <span>Loot:</span>
-          {reveal.loot.map((s, i) => (
-            <span
-              key={`loot-${reveal.round}-${s}-${i}`}
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1"
-            >
-              <DieIcon sides={s} />
-              <span className="font-mono">{shortDie(s)}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-// ---------- Self-tests (lightweight) ----------
-
-function runSelfTests() {
-  // Helper behavior
-  const pool: DiceSides[] = [4, 6, 6, 10];
-  const removed = removeOneDie(pool, 6);
-  console.assert(removed.length === 3, "removeOneDie should remove exactly one die");
-  console.assert(removed.filter((x) => x === 6).length === 1, "removeOneDie should remove one instance");
-  console.assert(pool.length === 4, "removeOneDie should not mutate original pool");
-
-  const added = addDice([4], [6, 10]);
-  console.assert(added.length === 3, "addDice should append dice");
-
-  // roll range
-  for (let i = 0; i < 50; i++) {
-    const r = rollDie(12);
-    console.assert(r >= 1 && r <= 12, "rollDie should be within 1..sides");
-  }
-}
-
-let __testsRan = false;
-
-// ---------- Main game ----------
-
-export default function DiceDuelGame() {
-  const [screen, setScreen] = useState<"menu" | "color" | "table" | "gameover">("menu");
-  const [userColorId, setUserColorId] = useState(COLOR_OPTIONS[0].id);
-  const [players, setPlayers] = useState<Player[]>(() => makeInitialPlayers(COLOR_OPTIONS[0].id));
-  const [round, setRound] = useState(1);
-  const [pending, setPending] = useState(false);
-  const [reveal, setReveal] = useState<Reveal | null>(null);
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [draggingSides, setDraggingSides] = useState<DiceSides | null>(null);
-  const [dropActive, setDropActive] = useState(false);
-
-  const autoTimeoutRef = useRef<number | null>(null);
-
-  // Run self-tests once (dev aid)
-  useEffect(() => {
-    if (__testsRan) return;
-    __testsRan = true;
-    try {
-      runSelfTests();
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const human = players[0];
-  const alive = useMemo(() => alivePlayers(players), [players]);
-  const isGameOver = alive.length === 1;
-  const isHumanOut = useMemo(() => human.eliminated || human.dice.length === 0, [human.eliminated, human.dice.length]);
-  const total = useMemo(() => totalDice(players), [players]);
-  const winnerBanner = useMemo(() => crownText(players), [players]);
-
-  const clearAuto = useCallback(() => {
-    if (autoTimeoutRef.current != null) {
-      clearTimeout(autoTimeoutRef.current);
-      autoTimeoutRef.current = null;
-    }
-  }, []);
-
-  const resetAll = useCallback(
-    (nextColorId: string = userColorId) => {
-      clearAuto();
-      setPlayers(makeInitialPlayers(nextColorId));
-      setRound(1);
-      setPending(false);
-      setReveal(null);
-      setLog([]);
-      setDraggingSides(null);
-      setDropActive(false);
-    },
-    [userColorId, clearAuto]
-  );
-
-  const startPlay = useCallback(() => setScreen("color"), []);
-
-  const confirmColor = useCallback(() => {
-    setPlayers(makeInitialPlayers(userColorId));
-    setScreen("table");
-  }, [userColorId]);
-
-  const toMenu = useCallback(() => {
-    resetAll(userColorId);
-    setScreen("menu");
-  }, [resetAll, userColorId]);
-
-  const playOneRound = useCallback(
-    (humanPickSidesOrNull: DiceSides | null) => {
-      if (pending || isGameOver) return;
-
-      setPending(true);
-
-      const diceCounts = players.map((p) => p.dice.length);
-      const nonZero = diceCounts.filter((n) => n > 0);
-      const minDiceCount = nonZero.length ? Math.min(...nonZero) : 0;
-
-      const choices: Array<DiceSides | null> = players.map((p) => {
-        if (p.eliminated || p.dice.length === 0) return null;
-        if (p.isHuman) {
-          if (humanPickSidesOrNull == null) return null;
-          return p.dice.includes(humanPickSidesOrNull) ? humanPickSidesOrNull : null;
+        
+        const material = new THREE.MeshPhongMaterial({
+          color: this.colorHex,
+          shininess: 80,
+          specular: 0x555555,
+          flatShading: true
+        });
+        
+        this.dice = new THREE.Mesh(geometry, material);
+        
+        const edges = new THREE.EdgesGeometry(geometry);
+        const lineMaterial = new THREE.LineBasicMaterial({ 
+          color: 0xffffff, 
+          opacity: 0.4, 
+          transparent: true 
+        });
+        const wireframe = new THREE.LineSegments(edges, lineMaterial);
+        this.dice.add(wireframe);
+        
+        this.addNumbers();
+        this.scene.add(this.dice);
+      }
+      
+      addNumbers() {
+        // Numbers removed for cleaner dice appearance
+      }
+      
+      getNumberPositions() {
+        const positions = [];
+        const dist = 1.4;
+        
+        switch(this.sides) {
+          case 4:
+            // Tetrahedron - 4 positions
+            positions.push(
+              new THREE.Vector3(0, dist * 1.2, 0),
+              new THREE.Vector3(dist, -dist * 0.4, dist),
+              new THREE.Vector3(-dist, -dist * 0.4, dist),
+              new THREE.Vector3(0, -dist * 0.4, -dist)
+            );
+            break;
+            
+          case 6:
+            // Cube - 6 faces
+            positions.push(
+              new THREE.Vector3(dist * 1.1, 0, 0),    // right
+              new THREE.Vector3(-dist * 1.1, 0, 0),   // left
+              new THREE.Vector3(0, dist * 1.1, 0),    // top
+              new THREE.Vector3(0, -dist * 1.1, 0),   // bottom
+              new THREE.Vector3(0, 0, dist * 1.1),    // front
+              new THREE.Vector3(0, 0, -dist * 1.1)    // back
+            );
+            break;
+            
+          case 10:
+            // Octahedron - 8 main + 2 poles
+            for (let i = 0; i < 8; i++) {
+              const angle = (i / 8) * Math.PI * 2;
+              const y = i % 2 === 0 ? dist * 0.5 : -dist * 0.5;
+              positions.push(new THREE.Vector3(
+                Math.cos(angle) * dist,
+                y,
+                Math.sin(angle) * dist
+              ));
+            }
+            positions.push(new THREE.Vector3(0, dist * 1.2, 0));
+            positions.push(new THREE.Vector3(0, -dist * 1.2, 0));
+            break;
+            
+          case 12:
+            // Dodecahedron - 12 positions
+            const phi = (1 + Math.sqrt(5)) / 2;
+            const a = 1 / Math.sqrt(3);
+            const b = a / phi;
+            const c = a * phi;
+            
+            const dodecaPos = [
+              [c, 0, b], [-c, 0, b], [c, 0, -b], [-c, 0, -b],
+              [b, c, 0], [b, -c, 0], [-b, c, 0], [-b, -c, 0],
+              [0, b, c], [0, -b, c], [0, b, -c], [0, -b, -c]
+            ];
+            
+            dodecaPos.forEach(p => {
+              positions.push(new THREE.Vector3(p[0], p[1], p[2]).normalize().multiplyScalar(dist));
+            });
+            break;
+            
+          case 20:
+            // Icosahedron - 20 positions
+            const t = (1 + Math.sqrt(5)) / 2;
+            const icoBase = [
+              [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+              [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+              [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]
+            ];
+            
+            // Create faces from vertices
+            for (let i = 0; i < 20; i++) {
+              const angle = (i / 10) * Math.PI;
+              const ring = Math.floor(i / 5);
+              const offset = (ring % 2) * 0.2;
+              positions.push(new THREE.Vector3(
+                Math.cos(angle + offset) * dist,
+                (ring - 1.5) * dist * 0.5,
+                Math.sin(angle + offset) * dist
+              ));
+            }
+            break;
         }
-        return chooseAIDie(p, { minDiceCount });
+        
+        return positions;
+      }
+      
+      animate() {
+        this.animationId = requestAnimationFrame(() => this.animate());
+
+        if (this.autoRotate) {
+          this.dice.rotation.x += 0.006;
+          this.dice.rotation.y += 0.01;
+        }
+
+        this.renderer.render(this.scene, this.camera);
+      }
+      
+      roll(callback) {
+        this.autoRotate = false;
+        
+        const duration = 2000;
+        const startTime = Date.now();
+        const startRotX = this.dice.rotation.x;
+        const startRotY = this.dice.rotation.y;
+        const startRotZ = this.dice.rotation.z;
+        
+        const rollAnimation = () => {
+          const elapsed = Date.now() - startTime;
+          const progress = Math.min(elapsed / duration, 1);
+          const eased = 1 - Math.pow(1 - progress, 3);
+          
+          this.dice.rotation.x = startRotX + (Math.PI * 10 * eased);
+          this.dice.rotation.y = startRotY + (Math.PI * 8 * eased);
+          this.dice.rotation.z = startRotZ + (Math.PI * 6 * eased);
+          this.dice.position.y = Math.sin(progress * Math.PI) * 1.5;
+          
+          if (progress < 1) {
+            requestAnimationFrame(rollAnimation);
+          } else {
+            this.dice.position.y = 0;
+            if (callback) callback();
+          }
+        };
+        
+        rollAnimation();
+      }
+      
+      showNumber(number) {
+        // Remove existing overlay if any
+        if (this.resultOverlay) {
+          this.dice.remove(this.resultOverlay);
+          this.resultOverlay.geometry?.dispose?.();
+          this.resultOverlay.material?.map?.dispose?.();
+          this.resultOverlay.material?.dispose?.();
+          this.resultOverlay = null;
+        }
+
+        // Stop any idle spin so it looks static
+        this.autoRotate = false;
+
+        // Build texture
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+
+        // Add black outline
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 24;
+        ctx.lineJoin = 'round';
+        ctx.font = 'bold 280px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeText(String(number), 256, 270);
+
+        // Fill with white
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(String(number), 256, 270);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthTest: true
+        });
+
+        // Plane overlay
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.8), material);
+
+        // Position it slightly above the surface facing camera direction.
+        // (Simple approximation that looks good once the die stops moving.)
+        const r = this.dice.geometry.boundingSphere?.radius || 1.8;
+        plane.position.set(0, 0, r + 0.05);
+
+        this.dice.add(plane);
+        this.resultOverlay = plane;
+      }
+      
+      hideNumber() {
+        if (this.resultOverlay) {
+          this.dice.remove(this.resultOverlay);
+          this.resultOverlay.geometry?.dispose?.();
+          this.resultOverlay.material?.map?.dispose?.();
+          this.resultOverlay.material?.dispose?.();
+          this.resultOverlay = null;
+        }
+      }
+      
+      destroy() {
+        if (this.animationId) {
+          cancelAnimationFrame(this.animationId);
+        }
+        if (this.renderer && this.container.contains(this.renderer.domElement)) {
+          this.container.removeChild(this.renderer.domElement);
+        }
+        if (this.renderer) {
+          this.renderer.dispose();
+        }
+      }
+    }
+
+    // ========== Helper Functions ==========
+    function rollDie(sides) {
+      return Math.floor(Math.random() * sides) + 1;
+    }
+
+    function removeOneDie(pool, sides) {
+      const idx = pool.indexOf(sides);
+      if (idx === -1) return pool;
+      const next = [...pool];
+      next.splice(idx, 1);
+      return next;
+    }
+
+    function alivePlayers(players) {
+      return players.filter(p => !p.eliminated && p.dice.length > 0);
+    }
+
+    function makeInitialPlayers(playerName) {
+      const userColor = COLOR_OPTIONS[0];
+      const otherColors = COLOR_OPTIONS.slice(1);
+
+      return [
+        { id: 0, name: playerName, isHuman: true, color: userColor, dice: [...DICE_SIDES], eliminated: false },
+        { id: 1, name: COMPUTER_NAMES[0], isHuman: false, color: otherColors[0], dice: [...DICE_SIDES], eliminated: false },
+        { id: 2, name: COMPUTER_NAMES[1], isHuman: false, color: otherColors[1], dice: [...DICE_SIDES], eliminated: false },
+        { id: 3, name: COMPUTER_NAMES[2], isHuman: false, color: otherColors[2], dice: [...DICE_SIDES], eliminated: false }
+      ];
+    }
+
+    function countBySides(dice) {
+      const map = new Map();
+      for (const s of dice) map.set(s, (map.get(s) || 0) + 1);
+      return [...map.entries()].sort((a, b) => a[0] - b[0]);
+    }
+
+    function vibrate() {
+      if (navigator.vibrate) {
+        navigator.vibrate(100);
+      }
+    }
+
+    function shakeScreen() {
+      const app = document.getElementById('app');
+      app.classList.add('screen-shake');
+      setTimeout(() => app.classList.remove('screen-shake'), 500);
+    }
+
+    function getDiceShapeClass(sides) {
+      return `dice-shape-d${sides}`;
+    }
+
+    // ========== Sound Effects ==========
+    function playDiceRollSound() {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const now = audioContext.currentTime;
+      
+      // Slot machine spinning sound - rapid clicking/ticking
+      const tickCount = 25;
+      const duration = 1.8;
+      
+      for (let i = 0; i < tickCount; i++) {
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        
+        // Create mechanical tick sound with varying pitch
+        const progress = i / tickCount;
+        const baseFreq = 800 + (progress * 400); // Pitch rises as it spins
+        osc.frequency.value = baseFreq;
+        osc.type = 'square';
+        
+        // Tick timing - accelerates then decelerates like a slot machine
+        let tickTime;
+        if (progress < 0.3) {
+          // Speed up
+          tickTime = now + (i * 0.04);
+        } else if (progress < 0.7) {
+          // Maintain speed
+          tickTime = now + 0.3 + ((i - 7) * 0.06);
+        } else {
+          // Slow down dramatically
+          tickTime = now + 0.9 + ((i - 17) * 0.11);
+        }
+        
+        const volume = 0.12 + (progress * 0.08);
+        
+        gain.gain.setValueAtTime(0, tickTime);
+        gain.gain.linearRampToValueAtTime(volume, tickTime + 0.002);
+        gain.gain.exponentialRampToValueAtTime(0.001, tickTime + 0.025);
+        
+        osc.connect(gain);
+        gain.connect(audioContext.destination);
+        
+        osc.start(tickTime);
+        osc.stop(tickTime + 0.03);
+      }
+      
+      // Final "ka-chunk" stop sound
+      setTimeout(() => {
+        // Lower thud
+        const thud1 = audioContext.createOscillator();
+        const thudGain1 = audioContext.createGain();
+        thud1.frequency.value = 120;
+        thud1.type = 'sine';
+        
+        const thudTime = audioContext.currentTime;
+        thudGain1.gain.setValueAtTime(0.2, thudTime);
+        thudGain1.gain.exponentialRampToValueAtTime(0.001, thudTime + 0.15);
+        
+        thud1.connect(thudGain1);
+        thudGain1.connect(audioContext.destination);
+        thud1.start(thudTime);
+        thud1.stop(thudTime + 0.15);
+        
+        // Higher click for the "chunk" part
+        const click = audioContext.createOscillator();
+        const clickGain = audioContext.createGain();
+        click.frequency.value = 1800;
+        click.type = 'square';
+        
+        clickGain.gain.setValueAtTime(0.15, thudTime + 0.02);
+        clickGain.gain.exponentialRampToValueAtTime(0.001, thudTime + 0.06);
+        
+        click.connect(clickGain);
+        clickGain.connect(audioContext.destination);
+        click.start(thudTime + 0.02);
+        click.stop(thudTime + 0.07);
+      }, 1600);
+    }
+
+    function playWinSound() {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const now = audioContext.currentTime;
+      
+      // Victory fanfare - ascending major chord arpeggio
+      const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+      
+      notes.forEach((freq, i) => {
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        
+        const startTime = now + (i * 0.12);
+        gain.gain.setValueAtTime(0, startTime);
+        gain.gain.linearRampToValueAtTime(0.2, startTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.5);
+        
+        osc.connect(gain);
+        gain.connect(audioContext.destination);
+        
+        osc.start(startTime);
+        osc.stop(startTime + 0.5);
+      });
+      
+      // Add sparkle/shimmer effect
+      for (let i = 0; i < 8; i++) {
+        const shimmer = audioContext.createOscillator();
+        const shimmerGain = audioContext.createGain();
+        
+        shimmer.frequency.value = 2000 + (Math.random() * 1000);
+        shimmer.type = 'sine';
+        
+        const shimmerTime = now + 0.3 + (i * 0.05);
+        shimmerGain.gain.setValueAtTime(0.08, shimmerTime);
+        shimmerGain.gain.exponentialRampToValueAtTime(0.001, shimmerTime + 0.15);
+        
+        shimmer.connect(shimmerGain);
+        shimmerGain.connect(audioContext.destination);
+        
+        shimmer.start(shimmerTime);
+        shimmer.stop(shimmerTime + 0.15);
+      }
+    }
+
+    function playLoseSound() {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const now = audioContext.currentTime;
+      
+      // Sad descending notes
+      const notes = [392.00, 329.63, 261.63]; // G4, E4, C4 - descending minor
+      
+      notes.forEach((freq, i) => {
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        
+        osc.frequency.value = freq;
+        osc.type = 'triangle';
+        
+        const startTime = now + (i * 0.2);
+        gain.gain.setValueAtTime(0, startTime);
+        gain.gain.linearRampToValueAtTime(0.15, startTime + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.6);
+        
+        osc.connect(gain);
+        gain.connect(audioContext.destination);
+        
+        osc.start(startTime);
+        osc.stop(startTime + 0.6);
+      });
+      
+      // Add a low "womp" sound
+      const womp = audioContext.createOscillator();
+      const wompGain = audioContext.createGain();
+      
+      womp.frequency.setValueAtTime(200, now + 0.5);
+      womp.frequency.exponentialRampToValueAtTime(80, now + 0.9);
+      womp.type = 'sawtooth';
+      
+      wompGain.gain.setValueAtTime(0.2, now + 0.5);
+      wompGain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+      
+      womp.connect(wompGain);
+      wompGain.connect(audioContext.destination);
+      
+      womp.start(now + 0.5);
+      womp.stop(now + 0.9);
+    }
+
+    // ========== Drag and Drop ==========
+    function handleDragStart(e, sides) {
+      gameState.draggedDie = sides;
+      e.currentTarget.classList.add('dragging');
+    }
+
+    function handleDragEnd(e) {
+      e.currentTarget.classList.remove('dragging');
+      gameState.draggedDie = null;
+      
+      const dropZone = document.getElementById('drop-zone');
+      if (dropZone) {
+        dropZone.classList.remove('drop-zone-active');
+      }
+    }
+
+    function handleDragOver(e) {
+      e.preventDefault();
+      const dropZone = document.getElementById('drop-zone');
+      if (dropZone) {
+        dropZone.classList.add('drop-zone-active');
+      }
+    }
+
+    function handleDragLeave(e) {
+      const dropZone = document.getElementById('drop-zone');
+      if (dropZone && !dropZone.contains(e.relatedTarget)) {
+        dropZone.classList.remove('drop-zone-active');
+      }
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      const dropZone = document.getElementById('drop-zone');
+      if (dropZone) {
+        dropZone.classList.remove('drop-zone-active');
+      }
+      
+      if (gameState.draggedDie) {
+        selectDie(gameState.draggedDie);
+      }
+    }
+
+    // ========== Game Logic ==========
+    function startGame() {
+      cleanupRenderers();
+      
+      const playerName = window.elementSdk?.config?.player_name || defaultConfig.player_name;
+      gameState.players = makeInitialPlayers(playerName);
+      gameState.round = 1;
+      gameState.phase = "selectDie";
+      gameState.selectedDie = null;
+      gameState.currentReveal = null;
+      gameState.gameLog = [];
+      gameState.isSpectatorMode = false;
+      
+      render();
+    }
+    
+    function cleanupRenderers() {
+      gameState.activeRenderers.forEach(renderer => {
+        if (renderer && renderer.destroy) {
+          renderer.destroy();
+        }
+      });
+      gameState.activeRenderers = [];
+    }
+
+    function selectDie(sides) {
+      gameState.selectedDie = sides;
+      gameState.phase = "rolling";
+      render();
+      
+      setTimeout(() => {
+        // Play dice rolling sound
+        playDiceRollSound();
+        
+        let completedRolls = 0;
+        const totalRolls = gameState.activeRenderers.length;
+        
+        gameState.activeRenderers.forEach(renderer => {
+          if (renderer && renderer.roll) {
+            renderer.roll(() => {
+              completedRolls++;
+              if (completedRolls === totalRolls) {
+                setTimeout(() => executeRound(), 300);
+              }
+            });
+          }
+        });
+      }, 100);
+    }
+
+    function executeRound() {
+      const alive = alivePlayers(gameState.players);
+      const rolls = [];
+
+      // Use the stored dice choices from currentRollingDice
+      alive.forEach((p, idx) => {
+        const chosenSides = gameState.currentRollingDice[idx];
+        const roll = rollDie(chosenSides);
+        rolls.push({ playerId: p.id, sides: chosenSides, roll });
       });
 
-      const playersAfterThrow: Player[] = players.map((p, idx) => {
-        const pick = choices[idx];
-        if (pick == null) return p;
-        return { ...p, dice: removeOneDie(p.dice, pick) };
+      vibrate();
+      shakeScreen();
+
+      let maxRoll = -1;
+      let winners = [];
+      rolls.forEach((r, idx) => {
+        if (r.roll > maxRoll) {
+          maxRoll = r.roll;
+          winners = [idx];
+        } else if (r.roll === maxRoll) {
+          winners.push(idx);
+        }
       });
 
-      const loot = choices.filter((c): c is DiceSides => c != null);
-      const activeIdx = choices
-        .map((c, i) => (c == null ? null : i))
-        .filter((x): x is number => x != null);
+      let tieBreaks = 0;
+      while (winners.length > 1) {
+        tieBreaks++;
+        const tieRolls = winners.map(idx => ({
+          idx,
+          roll: rollDie(rolls[idx].sides)
+        }));
+        const tieMax = Math.max(...tieRolls.map(t => t.roll));
+        winners = tieRolls.filter(t => t.roll === tieMax).map(t => t.idx);
+      }
 
-      if (activeIdx.length <= 1) {
-        setPlayers(updateEliminations(playersAfterThrow));
-        setPending(false);
+      const winnerIdx = winners[0];
+      const winnerRoll = rolls[winnerIdx];
+      const loserRolls = rolls.filter((_, i) => i !== winnerIdx);
+      const loot = loserRolls.map(r => r.sides);
+
+      gameState.players = gameState.players.map(p => {
+        if (p.id === winnerRoll.playerId) {
+          return { ...p, dice: [...p.dice, ...loot] };
+        }
+        const lostRoll = rolls.find(r => r.playerId === p.id && r.playerId !== winnerRoll.playerId);
+        if (lostRoll) {
+          const newDice = removeOneDie(p.dice, lostRoll.sides);
+          return { ...p, dice: newDice, eliminated: newDice.length === 0 };
+        }
+        return p;
+      });
+
+      gameState.currentReveal = {
+        round: gameState.round,
+        phase: "done",
+        rolls,
+        winnerIdx,
+        loot,
+        tieBreaks
+      };
+
+      const winner = gameState.players.find(p => p.id === winnerRoll.playerId);
+      gameState.gameLog.unshift({
+        round: gameState.round,
+        winnerName: winner.name,
+        tieBreaks,
+        loot,
+        results: rolls.map(r => ({
+          playerId: r.playerId,
+          name: gameState.players.find(p => p.id === r.playerId).name,
+          sides: r.sides,
+          roll: r.roll,
+          isWinner: r.playerId === winnerRoll.playerId
+        }))
+      });
+
+      gameState.phase = "results";
+      
+      rolls.forEach((roll, idx) => {
+        if (gameState.activeRenderers[idx]) {
+          gameState.activeRenderers[idx].showNumber(roll.roll);
+        }
+      });
+      
+      // Play win/lose sound for human player
+      const humanPlayer = gameState.players.find(p => p.isHuman);
+      if (humanPlayer) {
+        const humanWon = winnerRoll.playerId === humanPlayer.id;
+        setTimeout(() => {
+          if (humanWon) {
+            playWinSound();
+          } else {
+            playLoseSound();
+          }
+        }, 500);
+      }
+      
+      // Update the results display
+      gameState.phase = "results";
+      render();
+
+      const stillAlive = alivePlayers(gameState.players);
+      if (stillAlive.length === 1) {
+        gameState.phase = "gameOver";
+        render();
+      } else {
+        const humanAlive = stillAlive.find(p => p.isHuman);
+        const endOnElimination = (window.elementSdk?.config?.end_on_elimination || defaultConfig.end_on_elimination).toLowerCase() === 'yes';
+        
+        if (!humanAlive && endOnElimination) {
+          gameState.phase = "gameOver";
+          gameState.isSpectatorMode = false;
+          render();
+        } else if (!humanAlive) {
+          gameState.isSpectatorMode = true;
+        }
+      }
+    }
+    
+    function nextRound() {
+      if (gameState.isSpectatorMode) {
+        autoPlayNextRound();
+      } else {
+        gameState.round++;
+        gameState.phase = "selectDie";
+        gameState.selectedDie = null;
+        render();
+      }
+    }
+
+    function autoPlayNextRound() {
+      gameState.round++;
+      gameState.phase = "selectDie";
+      
+      const alive = alivePlayers(gameState.players);
+      const randomDie = alive[0].dice[Math.floor(Math.random() * alive[0].dice.length)];
+      gameState.selectedDie = randomDie;
+      
+      render();
+      setTimeout(() => {
+        gameState.phase = "rolling";
+        render();
+        setTimeout(() => executeRound(), 800);
+      }, 500);
+    }
+
+    // ========== Rendering ==========
+    function render() {
+      cleanupRenderers();
+      
+      const app = document.getElementById('app');
+      const config = window.elementSdk?.config || defaultConfig;
+      const customFont = config.font_family || defaultConfig.font_family;
+      const baseSize = config.font_size || defaultConfig.font_size;
+      const bgColor = config.background_color || defaultConfig.background_color;
+      const surfaceColor = config.surface_color || defaultConfig.surface_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      const gameTitle = config.game_title || defaultConfig.game_title;
+
+      if (gameState.phase === "setup") {
+        app.innerHTML = `
+          <div class="min-h-full flex items-center justify-center p-8" style="background: ${bgColor}; font-family: ${customFont}, system-ui, sans-serif;">
+            <div class="text-center fade-in">
+              <h1 class="mb-8" style="font-size: ${baseSize * 3}px; font-weight: 800; color: ${textColor};">${gameTitle}</h1>
+              <p class="mb-8" style="font-size: ${baseSize * 1.25}px; color: ${textColor}; opacity: 0.9;">4-Player Dice Battle Royale</p>
+              <button onclick="startGame()" class="px-12 py-4 rounded-xl font-bold transition-all hover:scale-105" style="background-color: ${primaryColor}; color: ${textColor}; font-size: ${baseSize * 1.25}px; box-shadow: 0 10px 40px rgba(139, 92, 246, 0.4);">
+                Start Game
+              </button>
+            </div>
+          </div>
+        `;
         return;
       }
 
-      // Resolve tie-breaks
-      let tieBreaks = 0;
-      const rollFor = (indices: number[]) => indices.map((i) => ({ i, sides: choices[i] as DiceSides, roll: rollDie(choices[i] as DiceSides) }));
-      let results = rollFor(activeIdx);
-
-      while (true) {
-        const maxRoll = Math.max(...results.map((r) => r.roll));
-        const tied = results.filter((r) => r.roll === maxRoll);
-        if (tied.length === 1) {
-          const winnerIdx = tied[0].i;
-
-          let nextPlayers = playersAfterThrow.map((p, idx) => (idx === winnerIdx ? { ...p, dice: addDice(p.dice, loot) } : p));
-          nextPlayers = updateEliminations(nextPlayers);
-
-          const outcomeRolls: RollRow[] = results.map((r) => ({ playerId: r.i, sides: r.sides, roll: r.roll }));
-
-          setReveal({ round, phase: "done", rolls: outcomeRolls, winnerIdx, loot, tieBreaks });
-
-          const entry: LogEntry = {
-            round,
-            winnerName: players[winnerIdx].isHuman ? "You" : players[winnerIdx].name,
-            tieBreaks,
-            loot,
-            results: outcomeRolls
-              .map((r) => ({
-                playerId: r.playerId,
-                name: players[r.playerId].isHuman ? "You" : players[r.playerId].name,
-                sides: r.sides,
-                roll: r.roll,
-                isWinner: r.playerId === winnerIdx,
-              }))
-              .sort((a, b) => a.playerId - b.playerId),
-          };
-
-          setLog((prev) => [entry, ...prev]);
-          setPlayers(nextPlayers);
-          setRound((r) => r + 1);
-          setPending(false);
-
-          if (alivePlayers(nextPlayers).length === 1) setScreen("gameover");
-          return;
-        }
-
-        tieBreaks += 1;
-        results = tied.map((t) => ({ i: t.i, sides: t.sides, roll: rollDie(t.sides) }));
-      }
-    },
-    [pending, isGameOver, players, round]
-  );
-
-  const playAIRound = useCallback(() => playOneRound(null), [playOneRound]);
-
-  // Auto-clear reveal after each round (no Next Round click)
-  useEffect(() => {
-    clearAuto();
-
-    if (screen !== "table") return;
-    if (pending) return;
-    if (isGameOver) return;
-
-    if (reveal && !isHumanOut) {
-      autoTimeoutRef.current = window.setTimeout(() => setReveal(null), 650);
-      return () => clearAuto();
-    }
-
-    // Spectator mode: continue automatically
-    if (!isHumanOut) return;
-
-    if (reveal) {
-      autoTimeoutRef.current = window.setTimeout(() => setReveal(null), 450);
-      return () => clearAuto();
-    }
-
-    autoTimeoutRef.current = window.setTimeout(() => playAIRound(), 650);
-    return () => clearAuto();
-  }, [screen, pending, isGameOver, reveal, isHumanOut, playAIRound, clearAuto]);
-
-  useEffect(() => () => clearAuto(), [clearAuto]);
-
-  const onDropField = useCallback(
-    (sides: DiceSides) => {
-      if (pending || isGameOver || isHumanOut) return;
-      if (!human.dice.includes(sides)) return;
-      playOneRound(sides);
-    },
-    [pending, isGameOver, isHumanOut, human.dice, playOneRound]
-  );
-
-  const bg = "bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white min-h-screen";
-
-  return (
-    <div className={bg}>
-      <div className="mx-auto max-w-7xl px-4 py-8">
-        <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Dice Duel</h1>
-            <p className="text-white/70">Drag to throw • Highest roll wins all thrown dice</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge color={players[0].color}>You</Badge>
-            <span className="text-sm text-white/60">Total dice in play: {total}</span>
-          </div>
-        </header>
-
-        {screen === "menu" && (
-          <div className="mt-8 grid gap-6 md:grid-cols-2">
-            <Card className="p-6">
-              <h2 className="text-xl font-semibold">Menu</h2>
-              <p className="mt-2 text-white/70">
-                4 players. Each round, everyone chooses 1 die in secret, then rolls. Highest roll takes all dice that were
-                thrown.
+      if (gameState.phase === "gameOver") {
+        const alive = alivePlayers(gameState.players);
+        const winner = alive.length > 0 ? alive[0] : gameState.players.find(p => p.dice.length > 0) || gameState.players[0];
+        const humanPlayer = gameState.players.find(p => p.isHuman);
+        const humanEliminated = humanPlayer.eliminated;
+        
+        app.innerHTML = `
+          <div class="min-h-full flex items-center justify-center p-8" style="background: ${bgColor}; font-family: ${customFont}, system-ui, sans-serif;">
+            <div class="text-center fade-in">
+              <div class="mb-6" style="font-size: ${baseSize * 4}px;">${humanEliminated && winner.isHuman === false ? '💀' : '���'}</div>
+              <h1 class="mb-4" style="font-size: ${baseSize * 2.5}px; font-weight: 800; color: ${textColor};">
+                ${humanEliminated && winner.isHuman === false ? 'You Were Eliminated!' : winner.name + ' Wins!'}
+              </h1>
+              <p class="mb-8" style="font-size: ${baseSize * 1.125}px; color: ${textColor}; opacity: 0.8;">
+                ${winner.name} collected ${winner.dice.length} dice
               </p>
-              <div className="mt-5 flex gap-3">
-                <PrimaryButton onClick={startPlay}>Play</PrimaryButton>
-                <GhostButton onClick={() => resetAll(userColorId)}>Reset</GhostButton>
-              </div>
-              <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                <div className="text-sm font-semibold">Starting dice per player</div>
-                <div className="mt-3 flex flex-wrap gap-3">
-                  {DICE_SIDES.map((s) => (
-                    <span
-                      key={s}
-                      className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm font-semibold"
-                    >
-                      <DieIcon sides={s} className="opacity-90" />
-                      <span className="font-mono">{shortDie(s)}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </Card>
-
-            <Card className="p-6">
-              <h2 className="text-xl font-semibold">How to play</h2>
-              <ul className="mt-3 space-y-2 text-white/75">
-                <li>• Drag a die from your inventory into the play field to throw it.</li>
-                <li>• Computers pick secretly. Results reveal instantly.</li>
-                <li>• Highest roll wins all thrown dice (ties reroll among tied players).</li>
-                <li>• If you’re eliminated, computers continue automatically to determine the winner.</li>
-              </ul>
-            </Card>
-          </div>
-        )}
-
-        {screen === "color" && (
-          <div className="mt-8 grid gap-6 md:grid-cols-2">
-            <Card className="p-6">
-              <h2 className="text-xl font-semibold">Choose your colour</h2>
-              <p className="mt-2 text-white/70">This will be the colour of your dice set.</p>
-
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {COLOR_OPTIONS.map((c) => {
-                  const active = userColorId === c.id;
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => setUserColorId(c.id)}
-                      className={cls(
-                        "rounded-2xl border p-4 text-left",
-                        active ? "border-white/40 bg-white/10" : "border-white/10 bg-white/5"
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={cls("h-9 w-9 rounded-xl", c.swatch)} />
-                        <div>
-                          <div className="font-semibold">{c.label}</div>
-                          <div className="text-xs text-white/60">{c.id}</div>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="mt-5 flex gap-3">
-                <PrimaryButton onClick={confirmColor}>Continue</PrimaryButton>
-                <GhostButton onClick={toMenu}>Back</GhostButton>
-              </div>
-            </Card>
-
-            <Card className="p-6">
-              <h2 className="text-xl font-semibold">Preview</h2>
-              <p className="mt-2 text-white/70">You’ll face three AI players.</p>
-              <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold">Your badge</span>
-                  <Badge color={COLOR_OPTIONS.find((x) => x.id === userColorId)}>
-                    You ({COLOR_OPTIONS.find((x) => x.id === userColorId)?.label})
-                  </Badge>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-
-        {(screen === "table" || screen === "gameover") && (
-          <div className="mt-8 grid gap-6 lg:grid-cols-12">
-            <div className="lg:col-span-3 space-y-6">
-              <PlayerStats players={players} />
-            </div>
-
-            <div className="lg:col-span-6 space-y-6">
-              <Card className="p-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <h2 className="text-xl font-semibold">Table</h2>
-                    <p className="text-white/70">
-                      Round {round}
-                      {pending
-                        ? " • resolving…"
-                        : reveal
-                        ? " • reveal"
-                        : isHumanOut && !isGameOver
-                        ? " • spectator mode (auto)"
-                        : " • throw a die"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <GhostButton
-                      onClick={() => {
-                        resetAll(userColorId);
-                        setScreen("table");
-                      }}
-                    >
-                      New game
-                    </GhostButton>
-                    <GhostButton onClick={toMenu}>Menu</GhostButton>
-                  </div>
-                </div>
-
-                {isHumanOut && !isGameOver && (
-                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.06] p-4">
-                    <div className="font-semibold">You’re out — spectator mode</div>
-                    <div className="text-sm text-white/70">Computers will continue automatically until a winner is decided.</div>
-                  </div>
-                )}
-
-                <div className="mt-6">
-                  <Card className="p-5">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-base font-semibold">Your inventory</h3>
-                      <span className="text-xs text-white/60">Drag a die into the play field</span>
-                    </div>
-
-                    {human.dice.length === 0 ? (
-                      <div className="mt-3 text-sm text-white/60">You have no dice left.</div>
-                    ) : (
-                      <div className="mt-4">
-                        <DicePile
-                          dice={human.dice}
-                          disabled={pending || !!reveal || screen === "gameover" || isHumanOut}
-                          onDragStart={(s) => setDraggingSides(s)}
-                        />
-                      </div>
-                    )}
-
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      {reveal ? (
-                        <div className="text-sm text-white/60">{isHumanOut ? "Spectating…" : "Round complete — readying next throw…"}</div>
-                      ) : (
-                        <div className="text-sm text-white/60">{isHumanOut ? "Spectating…" : "Throw by dragging into the field below."}</div>
-                      )}
-                      <GhostButton
-                        onClick={() => setDraggingSides(null)}
-                        disabled={pending || !!reveal || screen === "gameover" || isHumanOut}
-                      >
-                        Clear drag
-                      </GhostButton>
-                    </div>
-                  </Card>
-                </div>
-
-                <div className="mt-6">
-                  <div
-                    className={cls(
-                      "rounded-2xl border p-4 transition",
-                      dropActive ? "border-white bg-white/10" : "border-white/10 bg-white/[0.03]"
-                    )}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      if (!isHumanOut && !pending && !reveal) setDropActive(true);
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      try {
-                        e.dataTransfer.dropEffect = "move";
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    onDragLeave={() => setDropActive(false)}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setDropActive(false);
-                      let data = "";
-                      try {
-                        data = e.dataTransfer.getData("text/plain");
-                      } catch {
-                        data = "";
-                      }
-                      const s = Number(data);
-                      if (!Number.isFinite(s)) return;
-                      onDropField(s as DiceSides);
-                      setDraggingSides(null);
-                    }}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="font-semibold">Play field</div>
-                        <div className="text-sm text-white/70">
-                          {isHumanOut
-                            ? "Spectator mode — computers roll automatically."
-                            : pending
-                            ? "Resolving…"
-                            : reveal
-                            ? "Result shown below"
-                            : "Drop a die here to throw"}
-                        </div>
-                      </div>
-                      {draggingSides ? (
-                        <div className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                          <span className="text-xs text-white/60">Dragging</span>
-                          <DieIcon sides={draggingSides} />
-                          <span className="font-mono text-sm font-semibold">{shortDie(draggingSides)}</span>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    <div className="mt-4">
-                      <RollResultsPanel players={players} reveal={reveal} />
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
-              {screen === "gameover" && (
-                <Card className="p-6">
-                  <div className="text-xl font-bold">Game Over</div>
-                  <div className="mt-1 text-white/80">{winnerBanner || "A winner was decided."}</div>
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    <PrimaryButton
-                      onClick={() => {
-                        resetAll(userColorId);
-                        setScreen("table");
-                      }}
-                    >
-                      Play again
-                    </PrimaryButton>
-                    <GhostButton onClick={toMenu}>Menu</GhostButton>
-                  </div>
-                </Card>
-              )}
-            </div>
-
-            <div className="lg:col-span-3 space-y-6">
-              <Log items={log} />
+              <button onclick="startGame()" class="px-10 py-3 rounded-xl font-bold transition-all hover:scale-105" style="background-color: ${primaryColor}; color: ${textColor}; font-size: ${baseSize * 1.125}px;">
+                Play Again
+              </button>
             </div>
           </div>
-        )}
-      </div>
-    </div>
-  );
-}
+        `;
+        return;
+      }
+
+      const alive = alivePlayers(gameState.players);
+      const humanPlayer = gameState.players.find(p => p.isHuman);
+      const humanAlive = alive.find(p => p.isHuman);
+
+      let mainContent = "";
+
+      if (gameState.phase === "selectDie" && humanAlive && !gameState.isSpectatorMode) {
+        const diceCounts = countBySides(humanPlayer.dice);
+        mainContent = `
+          <div class="text-center mb-8 fade-in">
+            <h2 class="mb-2" style="font-size: ${baseSize * 1.875}px; font-weight: 700; color: ${textColor};">Round ${gameState.round}</h2>
+            <p style="font-size: ${baseSize * 1.125}px; color: ${textColor}; opacity: 0.8;">Drag a die to the drop zone or click to roll</p>
+          </div>
+          
+          <div id="drop-zone" class="drop-zone max-w-2xl mx-auto p-12 rounded-3xl mb-8 text-center transition-all" 
+               ondragover="handleDragOver(event)" 
+               ondragleave="handleDragLeave(event)" 
+               ondrop="handleDrop(event)"
+               style="min-height: 200px; display: flex; align-items: center; justify-content: center;">
+            <p style="font-size: ${baseSize * 1.25}px; color: ${textColor}; opacity: 0.6;">Drop your die here to roll</p>
+          </div>
+          
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-6 max-w-4xl mx-auto">
+            ${diceCounts.map(([sides, count]) => `
+              <div class="text-center">
+                <div draggable="true" 
+                     class="dice-draggable dice-d${sides} ${getDiceShapeClass(sides)} w-28 h-28 mx-auto mb-3 rounded-2xl flex items-center justify-center cursor-pointer transition-all hover:scale-110"
+                     onclick="selectDie(${sides})"
+                     ondragstart="handleDragStart(event, ${sides})"
+                     ondragend="handleDragEnd(event)"
+                     style="background: linear-gradient(145deg, ${DICE_COLORS[sides].hex}, ${DICE_COLORS[sides].hex}dd); 
+                            box-shadow: 0 8px 25px rgba(0,0,0,0.4), inset -2px -2px 8px rgba(0,0,0,0.3), inset 2px 2px 8px rgba(255,255,255,0.2);
+                            position: relative;
+                            overflow: hidden;
+                            border: 3px solid rgba(255,255,255,0.4);">
+                  <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; 
+                              background: repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,0.05) 3px, rgba(255,255,255,0.05) 6px),
+                                          repeating-linear-gradient(-45deg, transparent, transparent 3px, rgba(0,0,0,0.05) 3px, rgba(0,0,0,0.05) 6px);
+                              pointer-events: none;"></div>
+                  <div style="font-size: ${baseSize * 2.5}px; font-weight: 800; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.5), 0 0 10px rgba(255,255,255,0.3); position: relative; z-index: 1;">${sides}</div>
+                </div>
+                <div style="font-size: ${baseSize * 1.125}px; font-weight: 600; color: ${textColor};">D${sides}</div>
+                <div style="font-size: ${baseSize * 0.875}px; color: ${textColor}; opacity: 0.7;">×${count}</div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } else if (gameState.phase === "rolling") {
+        // Store selected dice for each player
+        gameState.currentRollingDice = alive.map(p => {
+          return p.isHuman ? gameState.selectedDie : p.dice[Math.floor(Math.random() * p.dice.length)];
+        });
+        
+        mainContent = `
+          <div class="text-center mb-8 fade-in">
+            <h2 class="mb-4" style="font-size: ${baseSize * 1.875}px; font-weight: 700; color: ${textColor};">Rolling Dice...</h2>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-8 max-w-5xl mx-auto">
+            ${alive.map((p, idx) => {
+              const dieToRoll = gameState.currentRollingDice[idx];
+              return `
+                <div class="text-center">
+                  <div style="font-size: ${baseSize}px; font-weight: 600; color: ${textColor}; margin-bottom: 10px;">${p.name}</div>
+                  <div id="dice-3d-${idx}" class="mx-auto" style="width: 200px; height: 200px;"></div>
+                  <div class="mt-2" style="font-size: ${baseSize * 0.875}px; color: ${textColor}; opacity: 0.7;">Rolling D${dieToRoll}</div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      } else if (gameState.phase === "results" && gameState.currentReveal) {
+        const reveal = gameState.currentReveal;
+        const winner = gameState.players.find(p => p.id === reveal.rolls[reveal.winnerIdx].playerId);
+        
+        mainContent = `
+          <div class="text-center mb-8 fade-in">
+            <h2 class="mb-2" style="font-size: ${baseSize * 1.875}px; font-weight: 700; color: ${textColor};">Round ${reveal.round} Results</h2>
+            ${reveal.tieBreaks > 0 ? `<p style="font-size: ${baseSize}px; color: ${textColor}; opacity: 0.8;">After ${reveal.tieBreaks} tiebreaker${reveal.tieBreaks > 1 ? 's' : ''}</p>` : ''}
+            ${reveal.loot.length > 0 ? `
+              <p class="mt-2" style="font-size: ${baseSize * 1.125}px; color: #fbbf24; font-weight: 600;">${winner.name} collected: ${reveal.loot.map(s => `D${s}`).join(', ')}</p>
+            ` : ''}
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-8 max-w-5xl mx-auto mb-8">
+            ${reveal.rolls.map((r, idx) => {
+              const player = gameState.players.find(p => p.id === r.playerId);
+              const isWinner = r.playerId === winner.id;
+              return `
+                <div class="text-center ${isWinner ? 'winner-glow' : ''}" style="position: relative;">
+                  <div class="flex items-center justify-center gap-2 mb-2">
+                    <div class="w-3 h-3 rounded-full" style="background-color: ${player.color.hex};"></div>
+                    <span style="font-size: ${baseSize}px; font-weight: 600; color: ${textColor};">${player.name}</span>
+                    ${isWinner ? `<div style="font-size: ${baseSize * 1.2}px;">👑</div>` : ''}
+                  </div>
+                  <div id="dice-result-${idx}" class="mx-auto" style="width: 200px; height: 200px;"></div>
+                  <div class="mt-2 flex items-center justify-center gap-2">
+                    <div class="dice-d${r.sides} ${getDiceShapeClass(r.sides)} w-8 h-8 rounded flex items-center justify-center" style="background: linear-gradient(145deg, ${DICE_COLORS[r.sides].hex}, ${DICE_COLORS[r.sides].hex}dd);">
+                      <span style="font-size: ${baseSize * 0.625}px; font-weight: 800; color: white;">${r.sides}</span>
+                    </div>
+                    <span style="font-size: ${baseSize * 0.875}px; color: ${textColor}; opacity: 0.7;">D${r.sides}</span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+          <div class="text-center mt-8 fade-in">
+            <button onclick="nextRound()" class="px-10 py-3 rounded-xl font-bold transition-all hover:scale-105" style="background-color: ${primaryColor}; color: ${textColor}; font-size: ${baseSize * 1.125}px; box-shadow: 0 4px 20px rgba(139, 92, 246, 0.4);">
+              ${gameState.isSpectatorMode ? 'Continue Watching' : 'Next Round'}
+            </button>
+          </div>
+          ${gameState.isSpectatorMode ? `
+            <div class="text-center mt-4 fade-in">
+              <p style="font-size: ${baseSize}px; color: ${textColor}; opacity: 0.8;">Spectator Mode</p>
+            </div>
+          ` : ''}
+        `;
+      }
+
+      const playerCards = gameState.players.map(p => {
+        const diceCount = p.dice.length;
+        const diceCounts = countBySides(p.dice);
+        return `
+          <div class="player-card p-4 rounded-xl ${p.eliminated ? 'opacity-50' : ''}" style="background-color: ${surfaceColor}; box-shadow: 0 2px 10px rgba(0,0,0,0.2);">
+            <div class="flex items-center gap-2 mb-2">
+              <div class="w-3 h-3 rounded-full" style="background-color: ${p.color.hex};"></div>
+              <span style="font-size: ${baseSize}px; font-weight: 600; color: ${textColor};">${p.name}</span>
+              ${p.eliminated ? `<span style="font-size: ${baseSize * 0.75}px; color: ${textColor}; opacity: 0.7;">OUT</span>` : ''}
+            </div>
+            <div style="font-size: ${baseSize * 0.875}px; color: ${textColor}; opacity: 0.8;">
+              ${diceCount} dice: ${diceCounts.map(([s, c]) => `${c}×D${s}`).join(', ')}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      app.innerHTML = `
+        <div class="min-h-full p-6" style="background: ${bgColor}; font-family: ${customFont}, system-ui, sans-serif;">
+          <div class="max-w-6xl mx-auto">
+            <div class="text-center mb-8">
+              <h1 class="mb-6" style="font-size: ${baseSize * 2}px; font-weight: 800; color: ${textColor};">${gameTitle}</h1>
+              
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
+                ${playerCards}
+              </div>
+            </div>
+
+            <div class="mb-8">
+              ${mainContent}
+            </div>
+
+            ${gameState.gameLog.length > 0 ? `
+              <div class="mt-12">
+                <h3 class="mb-4 text-center" style="font-size: ${baseSize * 1.25}px; font-weight: 700; color: ${textColor};">Game Log</h3>
+                <div class="space-y-3 max-w-3xl mx-auto max-h-64 overflow-y-auto">
+                  ${gameState.gameLog.slice(0, 10).map(log => `
+                    <div class="p-4 rounded-xl" style="background-color: ${surfaceColor}; box-shadow: 0 2px 10px rgba(0,0,0,0.2);">
+                      <div class="flex items-center justify-between mb-2">
+                        <span style="font-size: ${baseSize * 0.875}px; font-weight: 600; color: ${textColor};">Round ${log.round}</span>
+                        <span style="font-size: ${baseSize * 0.875}px; color: ${textColor}; opacity: 0.8;">${log.winnerName} won</span>
+                      </div>
+                      <div style="font-size: ${baseSize * 0.75}px; color: ${textColor}; opacity: 0.7;">
+                        ${log.results.map(r => `${r.name}: ${r.roll} (D${r.sides})${r.isWinner ? ' 👑' : ''}`).join(' ��� ')}
+                      </div>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+      
+      if (gameState.phase === "rolling") {
+        setTimeout(() => {
+          alive.forEach((p, idx) => {
+            const container = document.getElementById(`dice-3d-${idx}`);
+            if (container) {
+              const sides = gameState.currentRollingDice[idx];
+              const renderer = new DiceRenderer3D(container, sides, DICE_COLORS[sides].hex);
+              gameState.activeRenderers.push(renderer);
+            }
+          });
+        }, 50);
+      } else if (gameState.phase === "results" && gameState.currentReveal) {
+        setTimeout(() => {
+          gameState.currentReveal.rolls.forEach((roll, idx) => {
+            const container = document.getElementById(`dice-result-${idx}`);
+            if (container) {
+              const renderer = new DiceRenderer3D(container, roll.sides, DICE_COLORS[roll.sides].hex);
+              renderer.showNumber(roll.roll);
+              gameState.activeRenderers.push(renderer);
+            }
+          });
+        }, 50);
+      }
+    }
+
+    // ========== Element SDK Integration ==========
+    async function onConfigChange(config) {
+      render();
+    }
+
+    function mapToCapabilities(config) {
+      return {
+        recolorables: [
+          {
+            get: () => config.background_color || defaultConfig.background_color,
+            set: (value) => {
+              config.background_color = value;
+              window.elementSdk.setConfig({ background_color: value });
+            }
+          },
+          {
+            get: () => config.surface_color || defaultConfig.surface_color,
+            set: (value) => {
+              config.surface_color = value;
+              window.elementSdk.setConfig({ surface_color: value });
+            }
+          },
+          {
+            get: () => config.text_color || defaultConfig.text_color,
+            set: (value) => {
+              config.text_color = value;
+              window.elementSdk.setConfig({ text_color: value });
+            }
+          },
+          {
+            get: () => config.primary_action_color || defaultConfig.primary_action_color,
+            set: (value) => {
+              config.primary_action_color = value;
+              window.elementSdk.setConfig({ primary_action_color: value });
+            }
+          },
+          {
+            get: () => config.secondary_action_color || defaultConfig.secondary_action_color,
+            set: (value) => {
+              config.secondary_action_color = value;
+              window.elementSdk.setConfig({ secondary_action_color: value });
+            }
+          }
+        ],
+        borderables: [],
+        fontEditable: {
+          get: () => config.font_family || defaultConfig.font_family,
+          set: (value) => {
+            config.font_family = value;
+            window.elementSdk.setConfig({ font_family: value });
+          }
+        },
+        fontSizeable: {
+          get: () => config.font_size || defaultConfig.font_size,
+          set: (value) => {
+            config.font_size = value;
+            window.elementSdk.setConfig({ font_size: value });
+          }
+        }
+      };
+    }
+
+    function mapToEditPanelValues(config) {
+      return new Map([
+        ["game_title", config.game_title || defaultConfig.game_title],
+        ["player_name", config.player_name || defaultConfig.player_name],
+        ["end_on_elimination", config.end_on_elimination || defaultConfig.end_on_elimination]
+      ]);
+    }
+
+    // ========== Initialize ==========
+    if (window.elementSdk) {
+      window.elementSdk.init({
+        defaultConfig,
+        onConfigChange,
+        mapToCapabilities,
+        mapToEditPanelValues
+      });
+    }
+
+    render();
+  </script>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9b3a66dc9077fda0',t:'MTc2NjY4NzM0NC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
