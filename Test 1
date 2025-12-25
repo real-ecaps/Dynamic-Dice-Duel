@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+on:
+  push:
+    paths-ignore:
+      - '.github/**' # This workflow will not run if only files in .github/ are changed.
+
+
 /**
  * Dice Duel — 4-player dice battle
  * - No 3D animation
