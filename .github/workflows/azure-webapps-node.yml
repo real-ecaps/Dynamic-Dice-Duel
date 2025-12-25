@@ -1,0 +1,1089 @@
+# This workflow will build and push a node.js application to an Azure Web App when a commit is pushed to your default branch.
+#
+# This workflow assumes you have already created the target Azure App Service web app.
+# For instructions see https://docs.microsoft.com/en-us/azure/app-service/quickstart-nodejs?tabs=linux&pivots=development-environment-cli
+#
+# To configure this workflow:
+#
+# 1. Download the Publish Profile for your Azure Web App. You can download this file from the Overview page of your Web App in the Azure Portal.
+#    For more information: https://docs.microsoft.com/en-us/azure/app-service/deploy-github-actions?tabs=applevel#generate-deployment-credentials
+#
+# 2. Create a secret in your repository named AZURE_WEBAPP_PUBLISH_PROFILE, paste the publish profile contents as the value of the secret.
+#    For instructions on obtaining the publish profile see: https://docs.microsoft.com/azure/app-service/deploy-github-actions#configure-the-github-secret
+#
+# 3. Change the value for the AZURE_WEBAPP_NAME. Optionally, change the AZURE_WEBAPP_PACKAGE_PATH and NODE_VERSION environment variables below.
+#
+# For more information on GitHub Actions for Azure: https://github.com/Azure/Actions
+# For more information on the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
+# For more samples to get started with GitHub Action workflows to deploy to Azure: https://github.com/Azure/actions-workflow-samples
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  AZURE_WEBAPP_NAME: your-app-name    # set this to your application's name
+  AZURE_WEBAPP_PACKAGE_PATH: '.'      # set this to the path to your web app project, defaults to the repository root
+  NODE_VERSION: '20.x'                # set this to the node version to use
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: npm install, build, and test
+      run: |
+        npm install
+        npm run build --if-present
+        npm run test --if-present
+
+    - name: Upload artifact for deployment job
+      uses: actions/upload-artifact@v4
+      with:
+        name: node-app
+        path: .
+
+  deploy:
+    permissions:
+      contents: none
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: 'Development'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+    - name: Download artifact from build job
+      uses: actions/download-artifact@v4
+      with:
+        name: node-app
+
+    - name: 'Deploy to Azure WebApp'
+      id: deploy-to-webapp
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+
+
+        import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+/**
+ * Dice Duel — 4-player dice battle
+ * - No 3D animation
+ * - Winner outline (white border)
+ * - Auto-advance after each round (no Next Round button)
+ * - Spectator mode auto-plays after human elimination
+ */
+
+// ---------- Types ----------
+
+type DiceSides = 4 | 6 | 10 | 12 | 20;
+
+type ColorOption = {
+  id: string;
+  label: string;
+  swatch: string;
+  hex: string;
+};
+
+type Player = {
+  id: number;
+  name: string;
+  isHuman: boolean;
+  color: ColorOption;
+  dice: DiceSides[];
+  eliminated: boolean;
+};
+
+type RollRow = { playerId: number; sides: DiceSides; roll: number };
+
+type Reveal = {
+  round: number;
+  phase: "done";
+  rolls: RollRow[];
+  winnerIdx: number;
+  loot: DiceSides[];
+  tieBreaks: number;
+};
+
+type LogEntry = {
+  round: number;
+  winnerName: string;
+  tieBreaks: number;
+  loot: DiceSides[];
+  results: Array<{ playerId: number; name: string; sides: DiceSides; roll: number; isWinner: boolean }>;
+};
+
+// ---------- Constants ----------
+
+const DICE_SIDES: DiceSides[] = [4, 6, 10, 12, 20];
+
+const COLOR_OPTIONS: ColorOption[] = [
+  { id: "crimson", label: "Crimson", swatch: "bg-red-600", hex: "#dc2626" },
+  { id: "azure", label: "Azure", swatch: "bg-sky-600", hex: "#0284c7" },
+  { id: "emerald", label: "Emerald", swatch: "bg-emerald-600", hex: "#059669" },
+  { id: "violet", label: "Violet", swatch: "bg-violet-600", hex: "#7c3aed" },
+  { id: "amber", label: "Amber", swatch: "bg-amber-500", hex: "#f59e0b" },
+  { id: "slate", label: "Slate", swatch: "bg-slate-700", hex: "#334155" },
+];
+
+const COMPUTER_NAMES = ["Computer A", "Computer B", "Computer C"] as const;
+
+// ---------- Helpers ----------
+
+function cls(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
+
+function shortDie(sides: DiceSides) {
+  return `D${sides}`;
+}
+
+function rollDie(sides: DiceSides) {
+  return Math.floor(Math.random() * sides) + 1;
+}
+
+function removeOneDie(pool: DiceSides[], sides: DiceSides) {
+  const idx = pool.indexOf(sides);
+  if (idx === -1) return pool;
+  const next = pool.slice();
+  next.splice(idx, 1);
+  return next;
+}
+
+function addDice(pool: DiceSides[], diceToAdd: DiceSides[]) {
+  return pool.concat(diceToAdd);
+}
+
+function alivePlayers(players: Player[]) {
+  return players.filter((p) => !p.eliminated && p.dice.length > 0);
+}
+
+function updateEliminations(players: Player[]) {
+  return players.map((p) => ({ ...p, eliminated: p.dice.length === 0 }));
+}
+
+function totalDice(players: Player[]) {
+  return players.reduce((sum, p) => sum + p.dice.length, 0);
+}
+
+function crownText(players: Player[]) {
+  const alive = alivePlayers(players);
+  if (alive.length === 1) {
+    const w = alive[0];
+    return `${w.isHuman ? "You" : w.name} wins!`;
+  }
+  return "";
+}
+
+function countBySides(dice: DiceSides[]) {
+  const map = new Map<DiceSides, number>();
+  for (const s of dice) map.set(s, (map.get(s) || 0) + 1);
+  return [...map.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+function expandDice(dice: DiceSides[]) {
+  return dice.slice().sort((a, b) => a - b);
+}
+
+function makeInitialPlayers(userColorId: string): Player[] {
+  const userColor = COLOR_OPTIONS.find((c) => c.id === userColorId) || COLOR_OPTIONS[0];
+  const otherColors = COLOR_OPTIONS.filter((c) => c.id !== userColor.id);
+
+  return [
+    { id: 0, name: "You", isHuman: true, color: userColor, dice: [...DICE_SIDES], eliminated: false },
+    {
+      id: 1,
+      name: COMPUTER_NAMES[0],
+      isHuman: false,
+      color: otherColors[0] || COLOR_OPTIONS[1],
+      dice: [...DICE_SIDES],
+      eliminated: false,
+    },
+    {
+      id: 2,
+      name: COMPUTER_NAMES[1],
+      isHuman: false,
+      color: otherColors[1] || COLOR_OPTIONS[2],
+      dice: [...DICE_SIDES],
+      eliminated: false,
+    },
+    {
+      id: 3,
+      name: COMPUTER_NAMES[2],
+      isHuman: false,
+      color: otherColors[2] || COLOR_OPTIONS[3],
+      dice: [...DICE_SIDES],
+      eliminated: false,
+    },
+  ];
+}
+
+function chooseAIDie(aiPlayer: Player, context: { minDiceCount: number }): DiceSides | null {
+  const dice = aiPlayer.dice;
+  if (!dice.length) return null;
+
+  const { minDiceCount } = context;
+  const isTrailing = dice.length === minDiceCount;
+
+  if (isTrailing) {
+    const sorted = dice.slice().sort((a, b) => a - b);
+    const top = sorted.slice(-2);
+    if (Math.random() < 0.75 && top.length) return top[Math.floor(Math.random() * top.length)];
+  }
+
+  return dice[Math.floor(Math.random() * dice.length)];
+}
+
+// ---------- UI components ----------
+
+function Badge({ color, children }: { color?: ColorOption; children: React.ReactNode }) {
+  return (
+    <span
+      className={cls(
+        "inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold",
+        "bg-white/10 border border-white/10"
+      )}
+    >
+      <span className={cls("h-2.5 w-2.5 rounded-full", color?.swatch || "bg-slate-500")} />
+      {children}
+    </span>
+  );
+}
+
+function Card({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={cls("rounded-2xl border border-white/10 bg-white/[0.05] shadow-sm", "backdrop-blur-md", className)}>
+      {children}
+    </div>
+  );
+}
+
+function PrimaryButton({
+  children,
+  onClick,
+  disabled,
+  className,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cls(
+        "rounded-xl px-4 py-2 font-semibold",
+        disabled
+          ? "bg-white/10 text-white/40 cursor-not-allowed"
+          : "bg-white text-slate-900 hover:bg-white/90 active:bg-white/80",
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function GhostButton({
+  children,
+  onClick,
+  disabled,
+  className,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cls(
+        "rounded-xl px-4 py-2 font-semibold",
+        disabled
+          ? "bg-white/5 text-white/30 cursor-not-allowed"
+          : "bg-white/5 hover:bg-white/10 active:bg-white/15 text-white",
+        "border border-white/10",
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DieIcon({ sides, className }: { sides: DiceSides; className?: string }) {
+  const common = "fill-white/10 stroke-white/55";
+  const text = "fill-white";
+
+  const shape = (() => {
+    switch (sides) {
+      case 4:
+        return <polygon points="16,4 28,28 4,28" className={common} />;
+      case 6:
+        return <rect x="5" y="5" width="22" height="22" rx="4" className={common} />;
+      case 10:
+        return <polygon points="16,3 29,16 16,29 3,16" className={common} />;
+      case 12:
+        return <polygon points="16,2 26,7 30,16 26,25 16,30 6,25 2,16 6,7" className={common} />;
+      case 20:
+        return <circle cx="16" cy="16" r="13" className={common} />;
+      default:
+        return <rect x="5" y="5" width="22" height="22" rx="4" className={common} />;
+    }
+  })();
+
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      width="22"
+      height="22"
+      className={cls("shrink-0", className)}
+      aria-label={shortDie(sides)}
+      role="img"
+    >
+      {shape}
+      <text
+        x="16"
+        y="19"
+        textAnchor="middle"
+        fontSize="10"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+        className={text}
+      >
+        {shortDie(sides)}
+      </text>
+    </svg>
+  );
+}
+
+function DiceChip({
+  sides,
+  onDragStart,
+  draggable = true,
+  disabled = false,
+}: {
+  sides: DiceSides;
+  onDragStart?: (s: DiceSides) => void;
+  draggable?: boolean;
+  disabled?: boolean;
+}) {
+  const canDrag = draggable && !disabled;
+  return (
+    <div
+      draggable={canDrag}
+      onDragStart={(e) => {
+        if (!canDrag) return;
+        try {
+          e.dataTransfer.setData("text/plain", String(sides));
+          e.dataTransfer.effectAllowed = "move";
+        } catch {
+          // ignore
+        }
+        onDragStart?.(sides);
+      }}
+      className={cls(
+        "inline-flex items-center gap-2 rounded-xl border px-3 py-2",
+        "bg-white/5",
+        disabled
+          ? "opacity-40 cursor-not-allowed"
+          : canDrag
+          ? "cursor-grab active:cursor-grabbing"
+          : "cursor-default",
+        "border-white/10 hover:border-white/20"
+      )}
+      title={disabled ? "Unavailable" : canDrag ? "Drag into the play field to throw" : "Die"}
+    >
+      <DieIcon sides={sides} className="opacity-95" />
+      <span className="font-mono text-sm font-semibold">{shortDie(sides)}</span>
+    </div>
+  );
+}
+
+function DicePile({
+  dice,
+  disabled = false,
+  onDragStart,
+  draggable = true,
+  cap = 28,
+}: {
+  dice: DiceSides[];
+  disabled?: boolean;
+  onDragStart?: (s: DiceSides) => void;
+  draggable?: boolean;
+  cap?: number;
+}) {
+  const expanded = useMemo(() => expandDice(dice), [dice]);
+  const shown = expanded.slice(0, cap);
+  const remaining = expanded.length - shown.length;
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {shown.map((s, idx) => (
+        <DiceChip key={`${s}-${idx}`} sides={s} onDragStart={onDragStart} disabled={disabled} draggable={draggable} />
+      ))}
+      {remaining > 0 ? (
+        <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
+          +{remaining} more
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PlayerStats({ players }: { players: Player[] }) {
+  return (
+    <Card className="p-4">
+      <h3 className="text-base font-semibold">Players</h3>
+      <div className="mt-3 space-y-2 text-sm">
+        {players.map((p) => (
+          <div
+            key={`stat-${p.id}`}
+            className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+          >
+            <div className="flex items-center gap-2">
+              <span className={cls("h-2.5 w-2.5 rounded-full", p.color.swatch)} />
+              <span className={cls("text-white/85", p.eliminated ? "line-through opacity-70" : "")}>
+                {p.isHuman ? "You" : p.name}
+              </span>
+            </div>
+            <span className="font-semibold">{p.dice.length}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 text-xs text-white/60">Drag a die into the play field to throw.</div>
+    </Card>
+  );
+}
+
+function Log({ items }: { items: LogEntry[] }) {
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold">Match Log</h3>
+        <span className="text-xs text-white/60">Newest first</span>
+      </div>
+      <div className="mt-3 max-h-[34rem] overflow-auto space-y-2 pr-1">
+        {items.length === 0 ? (
+          <div className="text-sm text-white/60">No rounds yet. Throw a die to begin.</div>
+        ) : (
+          items.map((it, idx) => (
+            <div key={idx} className="rounded-xl border border-white/10 bg-white/[0.03] p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">Round {it.round}</span>
+                <span className="text-white/60">•</span>
+                <span className="text-white/80">Winner:</span>
+                <span className="font-semibold">{it.winnerName}</span>
+                {it.tieBreaks > 0 ? (
+                  <span className="text-xs text-white/60">(tie-breaks: {it.tieBreaks})</span>
+                ) : null}
+              </div>
+              <div className="mt-2 grid gap-2">
+                {it.results.map((r) => (
+                  <div
+                    key={r.playerId}
+                    className={cls(
+                      "flex items-center justify-between rounded-lg border bg-white/5 px-3 py-2",
+                      r.isWinner ? "border-white" : "border-white/10"
+                    )}
+                  >
+                    <span className="text-white/80">{r.name}</span>
+                    <span className="font-mono text-white inline-flex items-center gap-2">
+                      <DieIcon sides={r.sides} className="opacity-90" />
+                      <span>
+                        {shortDie(r.sides)} → {r.roll}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 text-xs text-white/60 flex flex-wrap items-center gap-2">
+                <span>Loot:</span>
+                {it.loot.map((s, i) => (
+                  <span
+                    key={`${it.round}-loot-${s}-${i}`}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1"
+                  >
+                    <DieIcon sides={s} className="opacity-90" />
+                    <span className="font-mono">{shortDie(s)}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function RollResultsPanel({ players, reveal }: { players: Player[]; reveal: Reveal | null }) {
+  if (!reveal) {
+    return (
+      <Card className="p-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold">Roll field</h3>
+          <div className="text-xs text-white/60">Drop a die to throw</div>
+        </div>
+        <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-white/70">
+          Waiting for a throw.
+        </div>
+      </Card>
+    );
+  }
+
+  const sorted = reveal.rolls.slice().sort((a, b) => a.playerId - b.playerId);
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold">Roll field</h3>
+        <div className="text-xs text-white/60">Result (winner outlined)</div>
+      </div>
+
+      <div className="mt-4 grid gap-2">
+        {sorted.map((r) => (
+          <div
+            key={`rrow-${r.playerId}`}
+            className={cls(
+              "flex items-center justify-between rounded-xl border bg-white/5 px-3 py-2",
+              r.playerId === reveal.winnerIdx ? "border-white" : "border-white/10"
+            )}
+          >
+            <span className="text-sm text-white/85">{players?.[r.playerId]?.isHuman ? "You" : players?.[r.playerId]?.name}</span>
+            <span className="font-mono text-sm inline-flex items-center gap-2">
+              <DieIcon sides={r.sides} />
+              {shortDie(r.sides)} → <span className="font-semibold">{r.roll}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-white/70">Winner:</span>
+          <span className="font-semibold">{players?.[reveal.winnerIdx]?.isHuman ? "You" : players?.[reveal.winnerIdx]?.name}</span>
+          {reveal.tieBreaks > 0 ? <span className="text-xs text-white/60">(tie-breaks: {reveal.tieBreaks})</span> : null}
+        </div>
+        <div className="mt-2 text-xs text-white/60 flex flex-wrap items-center gap-2">
+          <span>Loot:</span>
+          {reveal.loot.map((s, i) => (
+            <span
+              key={`loot-${reveal.round}-${s}-${i}`}
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1"
+            >
+              <DieIcon sides={s} />
+              <span className="font-mono">{shortDie(s)}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ---------- Self-tests (lightweight) ----------
+
+function runSelfTests() {
+  // Helper behavior
+  const pool: DiceSides[] = [4, 6, 6, 10];
+  const removed = removeOneDie(pool, 6);
+  console.assert(removed.length === 3, "removeOneDie should remove exactly one die");
+  console.assert(removed.filter((x) => x === 6).length === 1, "removeOneDie should remove one instance");
+  console.assert(pool.length === 4, "removeOneDie should not mutate original pool");
+
+  const added = addDice([4], [6, 10]);
+  console.assert(added.length === 3, "addDice should append dice");
+
+  // roll range
+  for (let i = 0; i < 50; i++) {
+    const r = rollDie(12);
+    console.assert(r >= 1 && r <= 12, "rollDie should be within 1..sides");
+  }
+}
+
+let __testsRan = false;
+
+// ---------- Main game ----------
+
+export default function DiceDuelGame() {
+  const [screen, setScreen] = useState<"menu" | "color" | "table" | "gameover">("menu");
+  const [userColorId, setUserColorId] = useState(COLOR_OPTIONS[0].id);
+  const [players, setPlayers] = useState<Player[]>(() => makeInitialPlayers(COLOR_OPTIONS[0].id));
+  const [round, setRound] = useState(1);
+  const [pending, setPending] = useState(false);
+  const [reveal, setReveal] = useState<Reveal | null>(null);
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [draggingSides, setDraggingSides] = useState<DiceSides | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+
+  const autoTimeoutRef = useRef<number | null>(null);
+
+  // Run self-tests once (dev aid)
+  useEffect(() => {
+    if (__testsRan) return;
+    __testsRan = true;
+    try {
+      runSelfTests();
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const human = players[0];
+  const alive = useMemo(() => alivePlayers(players), [players]);
+  const isGameOver = alive.length === 1;
+  const isHumanOut = useMemo(() => human.eliminated || human.dice.length === 0, [human.eliminated, human.dice.length]);
+  const total = useMemo(() => totalDice(players), [players]);
+  const winnerBanner = useMemo(() => crownText(players), [players]);
+
+  const clearAuto = useCallback(() => {
+    if (autoTimeoutRef.current != null) {
+      clearTimeout(autoTimeoutRef.current);
+      autoTimeoutRef.current = null;
+    }
+  }, []);
+
+  const resetAll = useCallback(
+    (nextColorId: string = userColorId) => {
+      clearAuto();
+      setPlayers(makeInitialPlayers(nextColorId));
+      setRound(1);
+      setPending(false);
+      setReveal(null);
+      setLog([]);
+      setDraggingSides(null);
+      setDropActive(false);
+    },
+    [userColorId, clearAuto]
+  );
+
+  const startPlay = useCallback(() => setScreen("color"), []);
+
+  const confirmColor = useCallback(() => {
+    setPlayers(makeInitialPlayers(userColorId));
+    setScreen("table");
+  }, [userColorId]);
+
+  const toMenu = useCallback(() => {
+    resetAll(userColorId);
+    setScreen("menu");
+  }, [resetAll, userColorId]);
+
+  const playOneRound = useCallback(
+    (humanPickSidesOrNull: DiceSides | null) => {
+      if (pending || isGameOver) return;
+
+      setPending(true);
+
+      const diceCounts = players.map((p) => p.dice.length);
+      const nonZero = diceCounts.filter((n) => n > 0);
+      const minDiceCount = nonZero.length ? Math.min(...nonZero) : 0;
+
+      const choices: Array<DiceSides | null> = players.map((p) => {
+        if (p.eliminated || p.dice.length === 0) return null;
+        if (p.isHuman) {
+          if (humanPickSidesOrNull == null) return null;
+          return p.dice.includes(humanPickSidesOrNull) ? humanPickSidesOrNull : null;
+        }
+        return chooseAIDie(p, { minDiceCount });
+      });
+
+      const playersAfterThrow: Player[] = players.map((p, idx) => {
+        const pick = choices[idx];
+        if (pick == null) return p;
+        return { ...p, dice: removeOneDie(p.dice, pick) };
+      });
+
+      const loot = choices.filter((c): c is DiceSides => c != null);
+      const activeIdx = choices
+        .map((c, i) => (c == null ? null : i))
+        .filter((x): x is number => x != null);
+
+      if (activeIdx.length <= 1) {
+        setPlayers(updateEliminations(playersAfterThrow));
+        setPending(false);
+        return;
+      }
+
+      // Resolve tie-breaks
+      let tieBreaks = 0;
+      const rollFor = (indices: number[]) => indices.map((i) => ({ i, sides: choices[i] as DiceSides, roll: rollDie(choices[i] as DiceSides) }));
+      let results = rollFor(activeIdx);
+
+      while (true) {
+        const maxRoll = Math.max(...results.map((r) => r.roll));
+        const tied = results.filter((r) => r.roll === maxRoll);
+        if (tied.length === 1) {
+          const winnerIdx = tied[0].i;
+
+          let nextPlayers = playersAfterThrow.map((p, idx) => (idx === winnerIdx ? { ...p, dice: addDice(p.dice, loot) } : p));
+          nextPlayers = updateEliminations(nextPlayers);
+
+          const outcomeRolls: RollRow[] = results.map((r) => ({ playerId: r.i, sides: r.sides, roll: r.roll }));
+
+          setReveal({ round, phase: "done", rolls: outcomeRolls, winnerIdx, loot, tieBreaks });
+
+          const entry: LogEntry = {
+            round,
+            winnerName: players[winnerIdx].isHuman ? "You" : players[winnerIdx].name,
+            tieBreaks,
+            loot,
+            results: outcomeRolls
+              .map((r) => ({
+                playerId: r.playerId,
+                name: players[r.playerId].isHuman ? "You" : players[r.playerId].name,
+                sides: r.sides,
+                roll: r.roll,
+                isWinner: r.playerId === winnerIdx,
+              }))
+              .sort((a, b) => a.playerId - b.playerId),
+          };
+
+          setLog((prev) => [entry, ...prev]);
+          setPlayers(nextPlayers);
+          setRound((r) => r + 1);
+          setPending(false);
+
+          if (alivePlayers(nextPlayers).length === 1) setScreen("gameover");
+          return;
+        }
+
+        tieBreaks += 1;
+        results = tied.map((t) => ({ i: t.i, sides: t.sides, roll: rollDie(t.sides) }));
+      }
+    },
+    [pending, isGameOver, players, round]
+  );
+
+  const playAIRound = useCallback(() => playOneRound(null), [playOneRound]);
+
+  // Auto-clear reveal after each round (no Next Round click)
+  useEffect(() => {
+    clearAuto();
+
+    if (screen !== "table") return;
+    if (pending) return;
+    if (isGameOver) return;
+
+    if (reveal && !isHumanOut) {
+      autoTimeoutRef.current = window.setTimeout(() => setReveal(null), 650);
+      return () => clearAuto();
+    }
+
+    // Spectator mode: continue automatically
+    if (!isHumanOut) return;
+
+    if (reveal) {
+      autoTimeoutRef.current = window.setTimeout(() => setReveal(null), 450);
+      return () => clearAuto();
+    }
+
+    autoTimeoutRef.current = window.setTimeout(() => playAIRound(), 650);
+    return () => clearAuto();
+  }, [screen, pending, isGameOver, reveal, isHumanOut, playAIRound, clearAuto]);
+
+  useEffect(() => () => clearAuto(), [clearAuto]);
+
+  const onDropField = useCallback(
+    (sides: DiceSides) => {
+      if (pending || isGameOver || isHumanOut) return;
+      if (!human.dice.includes(sides)) return;
+      playOneRound(sides);
+    },
+    [pending, isGameOver, isHumanOut, human.dice, playOneRound]
+  );
+
+  const bg = "bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white min-h-screen";
+
+  return (
+    <div className={bg}>
+      <div className="mx-auto max-w-7xl px-4 py-8">
+        <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Dice Duel</h1>
+            <p className="text-white/70">Drag to throw • Highest roll wins all thrown dice</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge color={players[0].color}>You</Badge>
+            <span className="text-sm text-white/60">Total dice in play: {total}</span>
+          </div>
+        </header>
+
+        {screen === "menu" && (
+          <div className="mt-8 grid gap-6 md:grid-cols-2">
+            <Card className="p-6">
+              <h2 className="text-xl font-semibold">Menu</h2>
+              <p className="mt-2 text-white/70">
+                4 players. Each round, everyone chooses 1 die in secret, then rolls. Highest roll takes all dice that were
+                thrown.
+              </p>
+              <div className="mt-5 flex gap-3">
+                <PrimaryButton onClick={startPlay}>Play</PrimaryButton>
+                <GhostButton onClick={() => resetAll(userColorId)}>Reset</GhostButton>
+              </div>
+              <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="text-sm font-semibold">Starting dice per player</div>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {DICE_SIDES.map((s) => (
+                    <span
+                      key={s}
+                      className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm font-semibold"
+                    >
+                      <DieIcon sides={s} className="opacity-90" />
+                      <span className="font-mono">{shortDie(s)}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </Card>
+
+            <Card className="p-6">
+              <h2 className="text-xl font-semibold">How to play</h2>
+              <ul className="mt-3 space-y-2 text-white/75">
+                <li>• Drag a die from your inventory into the play field to throw it.</li>
+                <li>• Computers pick secretly. Results reveal instantly.</li>
+                <li>• Highest roll wins all thrown dice (ties reroll among tied players).</li>
+                <li>• If you’re eliminated, computers continue automatically to determine the winner.</li>
+              </ul>
+            </Card>
+          </div>
+        )}
+
+        {screen === "color" && (
+          <div className="mt-8 grid gap-6 md:grid-cols-2">
+            <Card className="p-6">
+              <h2 className="text-xl font-semibold">Choose your colour</h2>
+              <p className="mt-2 text-white/70">This will be the colour of your dice set.</p>
+
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {COLOR_OPTIONS.map((c) => {
+                  const active = userColorId === c.id;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => setUserColorId(c.id)}
+                      className={cls(
+                        "rounded-2xl border p-4 text-left",
+                        active ? "border-white/40 bg-white/10" : "border-white/10 bg-white/5"
+                      )}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={cls("h-9 w-9 rounded-xl", c.swatch)} />
+                        <div>
+                          <div className="font-semibold">{c.label}</div>
+                          <div className="text-xs text-white/60">{c.id}</div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-5 flex gap-3">
+                <PrimaryButton onClick={confirmColor}>Continue</PrimaryButton>
+                <GhostButton onClick={toMenu}>Back</GhostButton>
+              </div>
+            </Card>
+
+            <Card className="p-6">
+              <h2 className="text-xl font-semibold">Preview</h2>
+              <p className="mt-2 text-white/70">You’ll face three AI players.</p>
+              <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold">Your badge</span>
+                  <Badge color={COLOR_OPTIONS.find((x) => x.id === userColorId)}>
+                    You ({COLOR_OPTIONS.find((x) => x.id === userColorId)?.label})
+                  </Badge>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {(screen === "table" || screen === "gameover") && (
+          <div className="mt-8 grid gap-6 lg:grid-cols-12">
+            <div className="lg:col-span-3 space-y-6">
+              <PlayerStats players={players} />
+            </div>
+
+            <div className="lg:col-span-6 space-y-6">
+              <Card className="p-6">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold">Table</h2>
+                    <p className="text-white/70">
+                      Round {round}
+                      {pending
+                        ? " • resolving…"
+                        : reveal
+                        ? " • reveal"
+                        : isHumanOut && !isGameOver
+                        ? " • spectator mode (auto)"
+                        : " • throw a die"}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <GhostButton
+                      onClick={() => {
+                        resetAll(userColorId);
+                        setScreen("table");
+                      }}
+                    >
+                      New game
+                    </GhostButton>
+                    <GhostButton onClick={toMenu}>Menu</GhostButton>
+                  </div>
+                </div>
+
+                {isHumanOut && !isGameOver && (
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.06] p-4">
+                    <div className="font-semibold">You’re out — spectator mode</div>
+                    <div className="text-sm text-white/70">Computers will continue automatically until a winner is decided.</div>
+                  </div>
+                )}
+
+                <div className="mt-6">
+                  <Card className="p-5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-base font-semibold">Your inventory</h3>
+                      <span className="text-xs text-white/60">Drag a die into the play field</span>
+                    </div>
+
+                    {human.dice.length === 0 ? (
+                      <div className="mt-3 text-sm text-white/60">You have no dice left.</div>
+                    ) : (
+                      <div className="mt-4">
+                        <DicePile
+                          dice={human.dice}
+                          disabled={pending || !!reveal || screen === "gameover" || isHumanOut}
+                          onDragStart={(s) => setDraggingSides(s)}
+                        />
+                      </div>
+                    )}
+
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      {reveal ? (
+                        <div className="text-sm text-white/60">{isHumanOut ? "Spectating…" : "Round complete — readying next throw…"}</div>
+                      ) : (
+                        <div className="text-sm text-white/60">{isHumanOut ? "Spectating…" : "Throw by dragging into the field below."}</div>
+                      )}
+                      <GhostButton
+                        onClick={() => setDraggingSides(null)}
+                        disabled={pending || !!reveal || screen === "gameover" || isHumanOut}
+                      >
+                        Clear drag
+                      </GhostButton>
+                    </div>
+                  </Card>
+                </div>
+
+                <div className="mt-6">
+                  <div
+                    className={cls(
+                      "rounded-2xl border p-4 transition",
+                      dropActive ? "border-white bg-white/10" : "border-white/10 bg-white/[0.03]"
+                    )}
+                    onDragEnter={(e) => {
+                      e.preventDefault();
+                      if (!isHumanOut && !pending && !reveal) setDropActive(true);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      try {
+                        e.dataTransfer.dropEffect = "move";
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    onDragLeave={() => setDropActive(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDropActive(false);
+                      let data = "";
+                      try {
+                        data = e.dataTransfer.getData("text/plain");
+                      } catch {
+                        data = "";
+                      }
+                      const s = Number(data);
+                      if (!Number.isFinite(s)) return;
+                      onDropField(s as DiceSides);
+                      setDraggingSides(null);
+                    }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-semibold">Play field</div>
+                        <div className="text-sm text-white/70">
+                          {isHumanOut
+                            ? "Spectator mode — computers roll automatically."
+                            : pending
+                            ? "Resolving…"
+                            : reveal
+                            ? "Result shown below"
+                            : "Drop a die here to throw"}
+                        </div>
+                      </div>
+                      {draggingSides ? (
+                        <div className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                          <span className="text-xs text-white/60">Dragging</span>
+                          <DieIcon sides={draggingSides} />
+                          <span className="font-mono text-sm font-semibold">{shortDie(draggingSides)}</span>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4">
+                      <RollResultsPanel players={players} reveal={reveal} />
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
+              {screen === "gameover" && (
+                <Card className="p-6">
+                  <div className="text-xl font-bold">Game Over</div>
+                  <div className="mt-1 text-white/80">{winnerBanner || "A winner was decided."}</div>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <PrimaryButton
+                      onClick={() => {
+                        resetAll(userColorId);
+                        setScreen("table");
+                      }}
+                    >
+                      Play again
+                    </PrimaryButton>
+                    <GhostButton onClick={toMenu}>Menu</GhostButton>
+                  </div>
+                </Card>
+              )}
+            </div>
+
+            <div className="lg:col-span-3 space-y-6">
+              <Log items={log} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
